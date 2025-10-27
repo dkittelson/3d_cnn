@@ -1,6 +1,0 @@
-data/
-saved_models/
-papers/
-.DS_Store
-__pycache__/
-.gitignore
