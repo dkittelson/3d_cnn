@@ -1,9 +1,18 @@
+import os
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
 import matplotlib.pyplot as plt
-from prepare_data import device
+from torchsummary import summary
+
+# Only import device if prepare_data is available (for backward compatibility)
+try:
+    from train import device
+except ImportError:
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # --- Define the Residual Block --- #
 class ResBlock3D(nn.Module):
@@ -62,6 +71,9 @@ class ResNet3D(nn.Module):
         self.res_block4 = ResBlock3D(in_channels=64, out_channels=64)
         self.pool2 = nn.MaxPool3d(kernel_size=2, stride=2)
 
+        self.res_block5 = ResBlock3D(in_channels=64, out_channels=128)
+        self.pool3 = nn.MaxPool3d(kernel_size=2, stride=2)
+
         # Global Average Pooling
         self.global_pool = nn.AdaptiveAvgPool3d(1)
 
@@ -90,6 +102,9 @@ class ResNet3D(nn.Module):
         x = self.res_block4(x)
         x = self.pool2(x)
 
+        x = self.res_block5(x)
+        x = self.pool3(x)
+
         # Global Average Pooling
         x = self.global_pool(x)
 
@@ -100,13 +115,23 @@ class ResNet3D(nn.Module):
         x = self.classifier(x)
 
         return x
+
+
+# --- Function to create a fresh model instance --- #
+def create_model():
+    """
+    Factory function to create a new ResNet3D model instance.
+    Useful for cross-validation where each fold needs a fresh model.
+    """
+    return ResNet3D()
+
     
-# --- Instantiate the model, loss, and optimizer ---
+# --- Instantiate the model, loss, and optimizer (for backward compatibility) ---
 model = ResNet3D().to(device)
 loss_fn = nn.BCELoss()  # Binary Cross-Entropy Loss 
 optimizer = optim.Adam(model.parameters(), lr=0.001)
 
-print(model)
+summary(model, input_size=(1, 32, 32, 32))
 
 
 
