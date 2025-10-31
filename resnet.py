@@ -79,7 +79,7 @@ class ResNet3D(nn.Module):
 
         # Classifier
         self.classifier = nn.Sequential(
-            nn.Linear(64, 32),
+            nn.Linear(128, 32),
             nn.ReLU(inplace=True),
             nn.Linear(32, 1),
             nn.Sigmoid()

@@ -95,48 +95,59 @@ def collect_data_by_folder():
 
 
 # ============================================================================
-# SECTION 3: CREATE TRAIN/TEST SPLIT FOR ONE FOLD
+# SECTION 3: CREATE TRAIN/VALIDATION SPLIT FOR ONE FOLD
 # ============================================================================
 
-def create_fold_data(dataset_dict, test_fold):
-    """Splits data into train and test sets for a specific fold"""
+def create_fold_data(dataset_dict, test_fold, val_fold):
+    """Splits data into train and validation sets for a specific fold"""
     
     # Create four empty lists
     train_files = []
     train_labels = []
+    val_files = []
+    val_labels = []
     test_files = []
     test_labels = []
     
     # Loop through each dataset in the dict
     for fold_name, (files, labels) in dataset_dict.items():
+        
+        # Test set
         if fold_name == test_fold:
             test_files.extend(files)
             test_labels.extend(labels)
+
+        # Validation set
+        elif fold_name == val_fold:
+            val_files.extend(files)
+            val_labels.extend(labels)
+
+        # Train set
         else:
             train_files.extend(files)
             train_labels.extend(labels)
 
         
-    return train_files, train_labels, test_files, test_labels
-
-
+    return train_files, train_labels, val_files, val_labels, test_files, test_labels
 # ============================================================================
 # SECTION 4: TRAIN ONE FOLD
 # ============================================================================
 
-def train_one_fold(fold_name, train_files, train_labels, test_files, test_labels, 
-                   device, num_epochs=20, patience=5, batch_size=16):
+def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, test_files, 
+                   test_labels, device, num_epochs=20, patience=5, batch_size=16):
     """Trains and evaluates a single fold"""
     
     # Print fold header and data summary
     print(f"\n{'='*80}")
-    print(f"FOLD: {fold_name} (Test Set)")
+    print(f"FOLD: {fold_name} (Validation Set)")
     print(f"{'='*80}")
     print(f"Training samples: {len(train_files)} (inactive={train_labels.count(0)}, active={train_labels.count(1)})")
+    print(f"Validation samples: {len(val_files)} (inactive={val_labels.count(0)}, active={val_labels.count(1)})")
     print(f"Test samples: {len(test_files)} (inactive={test_labels.count(0)}, active={test_labels.count(1)})")
     
-    # Create CellDataset objects for train and test
+    # Create CellDataset objects for train and validation
     train_dataset = CellDataset(train_files, train_labels)
+    val_dataset = CellDataset(val_files, val_labels)
     test_dataset = CellDataset(test_files, test_labels)
 
     # Create DataLoaders
@@ -147,9 +158,16 @@ def train_one_fold(fold_name, train_files, train_labels, test_files, test_labels
         num_workers=0,
         pin_memory=True if torch.cuda.is_available() else False
     )
-    test_loader = DataLoader(
-        test_dataset, 
+    val_loader = DataLoader(
+        val_dataset, 
         batch_size=batch_size, 
+        shuffle=False,
+        num_workers=0,
+        pin_memory=True if torch.cuda.is_available() else False
+    )
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
         shuffle=False,
         num_workers=0,
         pin_memory=True if torch.cuda.is_available() else False
@@ -233,7 +251,7 @@ def train_one_fold(fold_name, train_files, train_labels, test_files, test_labels
         total_val = 0
 
         # Progress bar
-        val_pbar = tqdm(test_loader, desc=f'Epoch {epoch+1}/{num_epochs} [Val]  ', 
+        val_pbar = tqdm(val_loader, desc=f'Epoch {epoch+1}/{num_epochs} [Val]  ', 
                         leave=False, ncols=100)
 
         # Disable gradient computation
@@ -259,7 +277,7 @@ def train_one_fold(fold_name, train_files, train_labels, test_files, test_labels
                 val_pbar.set_postfix({'loss': f'{loss.item():.4f}'})
 
             # Calculate epoch validation metrics
-            epoch_val_loss = running_val_loss / len(test_loader)
+            epoch_val_loss = running_val_loss / len(val_loader)
             epoch_val_acc = correct_val / total_val
 
             # Append to history lists
@@ -302,10 +320,43 @@ def train_one_fold(fold_name, train_files, train_labels, test_files, test_labels
                 print(f"\n⏹ Early stopping triggered after {epoch + 1} epochs")
                 print(f"Best model was at epoch {best_epoch} with Val Loss: {best_val_loss:.4f}")
                 break
-    
+
+    # ==== TESTING PHASE ====
+    print(f"\n{'='*80}")
+    print(f"TESTING ON HELD-OUT SET: {fold_name}")
+    print(f"{'='*80}")
+
+    # Load best model
+    checkpoint = torch.load(f'saved_models/best_model_fold_{fold_name}.pth')
+    model.load_state_dict(checkpoint['model_state_dict'])
+
+    model.eval()
+    running_test_loss = 0.0
+    correct_test = 0
+    total_test = 0
+
+    test_pbar = tqdm(test_loader, desc='Testing')
+
+    with torch.no_grad():
+        for inputs, labels in test_pbar:
+            inputs, labels = inputs.to(device), labels.to(device)
+            outputs = model(inputs)
+            loss = loss_fn(outputs, labels.unsqueeze[1])
+
+            running_test_loss += loss.item()
+            predicted = (outputs > 0).float()
+            total_test += labels.size(0)
+            correct_test += (predicted == labels.unsqueeze(1)).sum().item()
+
+            test_pbar.set_postfix({'loss': f'{loss.item():.4f}'})
+
+    test_loss = running_test_loss / len(test_loader)
+    test_acc = correct_test / total_test
+
     print(f"\nFold {fold_name} Complete!")
-    print(f"Best Epoch: {best_epoch} | Best Val Loss: {best_val_loss:.4f} | Best Val Acc: {best_val_acc:.4f}")
-    
+    print(f"Best Validation - Epoch: {best_epoch} | Val Loss: {best_val_loss:.4f} | Val Acc: {best_val_acc:.4f}")
+    print(f"Test Performance - Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f}")
+
     # Return results for this fold
     return {
         'fold': fold_name,
@@ -317,7 +368,7 @@ def train_one_fold(fold_name, train_files, train_labels, test_files, test_labels
         'train_accuracies': train_accuracies,
         'val_accuracies': val_accuracies,
         'num_train_samples': len(train_files),
-        'num_test_samples': len(test_files),
+        'num_val_samples': len(val_files),
     }    
 
 # ============================================================================
@@ -377,11 +428,11 @@ def plot_cross_validation_results(all_results, save_path='saved_models/cross_val
     # 5. Sample distribution
     plt.subplot(2, 3, 5)
     train_samples = [r['num_train_samples'] for r in all_results]
-    test_samples = [r['num_test_samples'] for r in all_results]
+    val_samples = [r['num_val_samples'] for r in all_results]
     x = np.arange(len(folds))
     width = 0.35
     plt.bar(x - width/2, train_samples, width, label='Train', color='lightgreen')
-    plt.bar(x + width/2, test_samples, width, label='Test', color='orange')
+    plt.bar(x + width/2, val_samples, width, label='Validation', color='orange')
     plt.xlabel('Fold')
     plt.ylabel('Number of Samples')
     plt.title('Sample Distribution per Fold')
@@ -451,23 +502,39 @@ def main():
     # Print total file count
     total_files = sum(len(files) for files, _ in dataset_dict.values())
     print(f"\nTotal files across all datasets: {total_files}")
+
+    # Get sorted folder names
+    folder_names = sorted(dataset_dict.keys())
     
     # Initialize list to store all results
     all_results = []
     
-    # Loop through each dataset as test fold
-    for fold_name in sorted(dataset_dict.keys()):
-        
-        # Create train/test split for this fold
-        train_files, train_labels, test_files, test_labels = create_fold_data(dataset_dict, test_fold=fold_name)
+    # ==== Leave-One-Patient-Out Cross-Validation ====
+    print("\n" + "="*80)
+    print("LEAVE-ONE-PATIENT-OUT CROSS-VALIDATION")
+    print("="*80)
+
+
+    for i, test_fold in enumerate(folder_names):
+
+        # Choose next folder as validation fold
+        val_fold = folder_names[(i + 1) % len(folder_names)]
+
+        print(f"\n>>> Configuration for this fold:")
+        print(f"    Test Fold: {test_fold}")
+        print(f"    Validation Fold: {val_fold}")
+        print(f"    Training Folds: {[f for f in folder_names if f not in [test_fold, val_fold]]}")
+
+        # Create train/val/test split
+        train_files, train_labels, val_files, val_labels, test_files, test_labels = create_fold_data(dataset_dict, test_fold=test_fold, val_fold=val_fold)
         
         # Train fold
         fold_result = train_one_fold(
-            fold_name=fold_name,
+            fold_name=test_fold,
             train_files=train_files,
             train_labels=train_labels,
-            test_files=test_files,
-            test_labels=test_labels,
+            val_files=val_files,
+            val_labels=val_labels,
             device=device,
             num_epochs=NUM_EPOCHS,
             patience=PATIENCE,
@@ -477,37 +544,37 @@ def main():
         # Append result to all_results
         all_results.append(fold_result)
     
-    # Print final summary table
+    # ==== Summary ====
     print("\n" + "="*80)
     print("CROSS-VALIDATION COMPLETE")
     print("="*80)
     
     print("\nResults Summary:")
-    print("-" * 80)
-    print(f"{'Fold':<8} {'Best Epoch':<12} {'Val Loss':<12} {'Val Accuracy':<15} {'Samples (train/test)'}")
-    print("-" * 80)
+    print("-" * 100)
+    print(f"{'Test Fold':<20} {'Val Fold':<20} {'Epoch':<8} {'Val Acc':<10} {'Test Acc':<10} {'Samples (train/val/test)'}")
+    print("-" * 100)
     
-    for result in all_results:
-        print(f"{result['fold']:<8} {result['best_epoch']:<12} "
-              f"{result['best_val_loss']:<12.4f} {result['best_val_acc']:<15.4f} "
-              f"{result['num_train_samples']}/{result['num_test_samples']}")
+    for i, result in enumerate(all_results):
+        val_fold = folder_names[(i + 1) % len(folder_names)]
+        print(f"{result['fold']:<20} {val_fold:<20} {result['best_epoch']:<8} "
+              f"{result['best_val_acc']:<10.4f} {result['test_acc']:<10.4f} "
+              f"{result['num_train_samples']}/{result['num_val_samples']}/{result['num_test_samples']}")
     
-    print("-" * 80)
+    print("-" * 100)
     
     # Calculate overall statistics
-    mean_acc = np.mean([r['best_val_acc'] for r in all_results])
-    std_acc = np.std([r['best_val_acc'] for r in all_results])
-    mean_loss = np.mean([r['best_val_loss'] for r in all_results])
-    std_loss = np.std([r['best_val_loss'] for r in all_results])
+    mean_test_acc = np.mean([r['test_acc'] for r in all_results])
+    std_test_acc = np.std([r['test_acc'] for r in all_results])
+    mean_val_acc = np.mean([r['best_val_acc'] for r in all_results])
+    std_val_acc = np.std([r['best_val_acc'] for r in all_results])
     
     print(f"\nOverall Performance:")
-    print(f"  Validation Accuracy: {mean_acc:.4f} ± {std_acc:.4f}")
-    print(f"  Validation Loss:     {mean_loss:.4f} ± {std_loss:.4f}")
+    print(f"  Validation Accuracy: {mean_val_acc:.4f} ± {std_val_acc:.4f}")
+    print(f"  Test Accuracy:       {mean_test_acc:.4f} ± {std_test_acc:.4f}")
     
     # Save results to JSON
     results_file = 'saved_models/cross_validation_results.json'
     with open(results_file, 'w') as f:
-        # Convert numpy arrays to lists for JSON serialization
         json_results = []
         for r in all_results:
             json_r = r.copy()
@@ -519,10 +586,10 @@ def main():
         
         json.dump({
             'timestamp': datetime.now().isoformat(),
-            'mean_accuracy': float(mean_acc),
-            'std_accuracy': float(std_acc),
-            'mean_loss': float(mean_loss),
-            'std_loss': float(std_loss),
+            'mean_val_accuracy': float(mean_val_acc),
+            'std_val_accuracy': float(std_val_acc),
+            'mean_test_accuracy': float(mean_test_acc),
+            'std_test_accuracy': float(std_test_acc),
             'folds': json_results
         }, f, indent=2)
     
@@ -530,6 +597,10 @@ def main():
     
     # Create visualization
     plot_cross_validation_results(all_results)
+    
+    print("\n" + "="*80)
+    print("COMPLETE!")
+    print("="*80)
 
 
 # ============================================================================
