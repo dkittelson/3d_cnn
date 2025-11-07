@@ -51,7 +51,7 @@ class ResBlock3D(nn.Module):
     
 # --- Define the Full 3D ResNet --- #
 class ResNet3D(nn.Module):
-    def __init__(self):
+    def __init__(self, dropout_rate=0.3):
         super(ResNet3D, self).__init__()
 
         # Initial Convolution Layer
@@ -63,32 +63,46 @@ class ResNet3D(nn.Module):
         )
 
         # Stack of Residual Blocks
+        # 32 Channels
         self.res_block1 = ResBlock3D(in_channels=32, out_channels=32)
         self.res_block2 = ResBlock3D(in_channels=32, out_channels=32)
+        self.res_block3 = ResBlock3D(in_channels=32, out_channels=32)
         self.pool1 = nn.MaxPool3d(kernel_size=2, stride=2)
+        self.dropout1 = nn.Dropout3d(p=dropout_rate) 
     
-        self.res_block3 = ResBlock3D(in_channels=32, out_channels=64)
-        self.res_block4 = ResBlock3D(in_channels=64, out_channels=64)
+        # 64 Channels
+        self.res_block4 = ResBlock3D(in_channels=32, out_channels=64)
+        self.res_block5 = ResBlock3D(in_channels=64, out_channels=64)
+        self.res_block6 = ResBlock3D(in_channels=64, out_channels=64)
         self.pool2 = nn.MaxPool3d(kernel_size=2, stride=2)
+        self.dropout2 = nn.Dropout3d(p=dropout_rate) 
 
-        self.res_block5 = ResBlock3D(in_channels=64, out_channels=128)
+        # 128 Channels
+        self.res_block7 = ResBlock3D(in_channels=64, out_channels=128)
+        self.res_block8 = ResBlock3D(in_channels=128, out_channels=128)
         self.pool3 = nn.MaxPool3d(kernel_size=2, stride=2)
+        self.dropout3 = nn.Dropout3d(p=dropout_rate) 
 
         # Global Average Pooling
         self.global_pool = nn.AdaptiveAvgPool3d(1)
 
         # Classifier
         self.classifier = nn.Sequential(
-            nn.Linear(128, 32),
+            nn.Linear(128, 64),
             nn.ReLU(inplace=True),
-            nn.Linear(32, 1),
-            nn.Sigmoid()
+            nn.Dropout(p=dropout_rate),
+            nn.Linear(64, 1),
         )
 
     def forward(self, x):
-
+        # Handle torchsummary adding extra dimension
+        if x.dim() == 6:
+            x = x.squeeze(0)
+        
         # PyTorch expects (N, C, D, H, W)
-        x = x.permute(0, 4, 3, 1, 2)
+        # Input from dataset is (N, H, W, T, C)
+        if x.shape[-1] == 1:  # Check if last dim is channels
+            x = x.permute(0, 4, 3, 1, 2)  # (N, H, W, T, C) -> (N, C, T, H, W)
 
         # Initial Convolution Layer
         x = self.initial_conv(x)
@@ -96,14 +110,20 @@ class ResNet3D(nn.Module):
         # Stack of Residual Blocks
         x = self.res_block1(x)
         x = self.res_block2(x)
-        x = self.pool1(x)
-        
         x = self.res_block3(x)
+        x = self.pool1(x)
+        x = self.dropout1(x)
+        
         x = self.res_block4(x)
-        x = self.pool2(x)
-
         x = self.res_block5(x)
+        x = self.res_block6(x)
+        x = self.pool2(x)
+        x = self.dropout2(x)
+
+        x = self.res_block7(x)
+        x = self.res_block8(x)
         x = self.pool3(x)
+        x = self.dropout3(x)
 
         # Global Average Pooling
         x = self.global_pool(x)
@@ -119,10 +139,6 @@ class ResNet3D(nn.Module):
 
 # --- Function to create a fresh model instance --- #
 def create_model():
-    """
-    Factory function to create a new ResNet3D model instance.
-    Useful for cross-validation where each fold needs a fresh model.
-    """
     return ResNet3D()
 
     
