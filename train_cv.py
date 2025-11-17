@@ -1,10 +1,10 @@
 """
 LEAVE-ONE-DONOR-OUT CROSS-VALIDATION 
 ==============================
-D6: Holdout (Final generalization test)
-D1, D2, D3, D4, D5: Used for Cross-Validation
+D5: Holdout (Final generalization test)
+D1, D2, D3, D4, D6: Used for Cross-Validation
 
-For Each Donor in [D1, D2, D3, D4, D5]:
+For Each Donor in [D1, D2, D3, D4, D6]:
     ├─ One Donor = Test Donor
     ├─ Remaining 4 Donors = Training Donors
     └─ Train model with fixed hyperparameters → Test on Test Donor
@@ -16,8 +16,8 @@ Fixed Hyperparameters:
 
 Final Test:
 1. Find Best Performing Fold
-2. Train on ALL 5 CV Donors (D1-D5)
-3. Test on D6 (completely held-out)
+2. Train on ALL 5 CV Donors (D1-D4, D6)
+3. Test on D5 (completely held-out)
 
 -- Basic Description -- 
 Leave-One-Donor-Out CV: Tests patient generalization
@@ -38,6 +38,12 @@ from pathlib import Path
 import json
 from datetime import datetime
 from sklearn.metrics import confusion_matrix, precision_recall_fscore_support
+import torch.nn.functional as F
+from torch.amp import autocast, GradScaler  
+
+# Enable TF32 for faster matmul on A100 GPUs (10-20% speedup)
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
 
 from resnet import create_model
 
@@ -136,24 +142,89 @@ class CellDataset(Dataset):
         # Load file
         array = np.load(self.file_paths[idx])
         
-        # Normalize array
-        max_val = np.max(array)
-        if max_val > 0:
-            array = array / max_val
-        
-        # Apply augmentation if enabled
+        # Get 5th and 95th percentiles, clip to percentile range and normalize to [0, 1]
+        p5, p95 = np.percentile(array, [5, 95])
+        if p95 > p5:
+            array = np.clip((array - p5) / (p95 - p5), 0, 1)
+        else:
+            array = array / (np.max(array) + 1e-8)
+
+        # Apply augmentation
         if self.augment:
             array = self.apply_augmentation(array)
 
-        # Add channel dimension 
-        array = np.expand_dims(array, axis = -1)
-        
+        # Add channel dimension
+        array = np.expand_dims(array, axis=-1)
+
         # Convert to torch tensors
         X = torch.tensor(array, dtype=torch.float32)
         y = torch.tensor(self.labels[idx], dtype=torch.float32)
-        
-        return X, y
 
+        return X, y
+    
+# ============================================================================
+# FOCAL LOSS FUNCTION
+# ============================================================================
+
+class FocalLoss(nn.Module):
+    "Focal Loss for handling class imbalances and overal generalization"
+    def __init__(self, gamma=2.0, auto_balance=True, label_smoothing=0.1):
+        super(FocalLoss, self).__init__()
+        self.gamma = gamma
+        self.auto_balance = auto_balance
+        self.alpha = None
+        self.label_smoothing = label_smoothing
+
+    def set_class_weights(self, pos_samples, neg_samples):
+        total = pos_samples + neg_samples
+        self.alpha = neg_samples / total
+
+        print(f"  ✓ Dynamic alpha computed: {self.alpha:.3f}")
+        print(f"    (Positive weight: {self.alpha:.3f}, Negative weight: {1-self.alpha:.3f})")
+        print(f"    Dataset: {pos_samples} active ({pos_samples/total*100:.1f}%), "
+              f"{neg_samples} inactive ({neg_samples/total*100:.1f}%)")
+
+    def forward(self, inputs, targets):
+            """Compute focal loss."""
+
+            # Ensure targets have correct shape
+            targets = targets.view(-1, 1).float()
+            if self.label_smoothing > 0:
+                targets = targets * (1 - self.label_smoothing) + 0.5 * self.label_smoothing
+
+              # Compute BCE Loss 
+            bce_loss = F.binary_cross_entropy_with_logits(
+                inputs, targets, reduction="none"
+            )
+
+            # Get probability of CORRECT class (sigmoid)
+            probs = torch.sigmoid(inputs)
+
+            # Calculate probability of the SPECIFIC class
+            # If target=1 (active), p_t = prob
+            # If target=0 (inactive), p_t = 1 - prob
+            p_t = probs * targets + (1 - probs) * (1 - targets)
+
+            # Calculate focal weights
+            # - Easy samples (p_t close to 1): weight → 0 (ignored)
+            # - Hard samples (p_t close to 0): weight → 1 (focused on)
+            focal_weight = (1 - p_t) ** self.gamma
+
+            # Calculate alpha weight to balance classes
+            if self.auto_balance and self.alpha is not None:
+                alpha_t = self.alpha * targets + (1 - self.alpha) * (1 - targets)
+            else:
+                alpha_t = 0.5
+
+            # Combines all components
+            focal_loss = alpha_t * focal_weight * bce_loss
+
+            # Return mean loss
+            return focal_loss.mean()
+
+    def __repr__(self):
+        alpha_str = f"{self.alpha:.3f}" if self.alpha else "auto"
+        return f"FocalLoss(alpha={alpha_str}, gamma={self.gamma})" 
 
 # ============================================================================
 # DATA COLLECTION BY FOLDER
@@ -238,51 +309,84 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
     
     # Print fold header and data summary
     print(f"\n{'='*80}")
-    print(f"FOLD: {fold_name} (Test Set)")
+    print(f"TRAINING FOLD: {fold_name}")
     print(f"{'='*80}")
-    print(f"Training samples: {len(train_files)} (inactive={train_labels.count(0)}, active={train_labels.count(1)})")
-    print(f"Validation samples: {len(val_files)} (inactive={val_labels.count(0)}, active={val_labels.count(1)})")  
-    print(f"Test samples: {len(test_files)} (inactive={test_labels.count(0)}, active={test_labels.count(1)})") 
+    print(f"Training samples: {len(train_files)}")
+    print(f"  - Inactive: {train_labels.count(0)} ({train_labels.count(0)/len(train_labels)*100:.1f}%)")
+    print(f"  - Active:   {train_labels.count(1)} ({train_labels.count(1)/len(train_labels)*100:.1f}%)")
+    print(f"Validation samples: {len(val_files)}")
+    print(f"  - Inactive: {val_labels.count(0)} ({val_labels.count(0)/len(val_labels)*100:.1f}%)")
+    print(f"  - Active:   {val_labels.count(1)} ({val_labels.count(1)/len(val_labels)*100:.1f}%)")
     
     # Create CellDataset objects for train and validation
     train_dataset = CellDataset(train_files, train_labels, augment=True) # model gets trained on 100% augmented images
     val_dataset = CellDataset(val_files, val_labels, augment=False) # model validated on raw, true images
 
-    # Create DataLoaders
+    # Print class distribution
+    print(f"\n📊 Class distribution:")
+    active_count = sum(1 for label in train_labels if label == 1)
+    inactive_count = len(train_labels) - active_count
+    print(f"  - Active cells: {active_count} ({active_count/len(train_labels)*100:.1f}%)")
+    print(f"  - Inactive cells: {inactive_count} ({inactive_count/len(train_labels)*100:.1f}%)")
+    print(f"  - Focal Loss (alpha=0.5, gamma=2.0) handles class imbalance automatically")
+    print(f"  - No manual resampling needed!\n")
+
+    # Create DataLoaders with simple random shuffling
     train_loader = DataLoader(
         train_dataset, 
         batch_size=batch_size, 
-        shuffle=True,
-        num_workers=0,
-        pin_memory=True if torch.cuda.is_available() else False
+        shuffle=True,  # Simple random shuffling - Focal Loss handles imbalance  
+        num_workers=4,  # Optimal for Colab
+        pin_memory=True if torch.cuda.is_available() else False,
+        persistent_workers=True,  # Keeps workers alive between epochs (much faster)
+        prefetch_factor=2  # Lower prefetch for persistent workers
     )
     val_loader = DataLoader(
         val_dataset, 
         batch_size=batch_size, 
         shuffle=False,
-        num_workers=0,
-        pin_memory=True if torch.cuda.is_available() else False
+        num_workers=4,  # Optimal for Colab
+        pin_memory=True if torch.cuda.is_available() else False,
+        persistent_workers=True,  # Keeps workers alive between epochs (much faster)
+        prefetch_factor=2  # Lower prefetch for persistent workers
     )
 
     # Create fresh model
     model = create_model().to(device)
     optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay) 
-    scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
-        optimizer,
-        T_0=5, #cycle length
-        T_mult=2, # multiply cycle length after each restart
-        eta_min=learning_rate / 100 # min LR
-    )
-    num_inactive = train_labels.count(0)
-    num_active = train_labels.count(1)
-    pos_weight = torch.tensor([num_inactive / num_active]).to(device) 
-    loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+
+    # Initialize gradient scaler for mixed precision
+    scaler = GradScaler(device.type)  
     
+    # ReduceLROnPlateau Scheduler
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(   
+        optimizer,
+        mode='min',           # Minimize validation loss
+        factor=0.5,           # Multiply LR by 0.5 when plateau detected
+        patience=5,           # Wait 5 epochs without improvement
+        min_lr=1e-6           # Don't go below this
+    )
+
+    # Focal Loss
+    loss_fn = FocalLoss(gamma=2.0, auto_balance=True, label_smoothing=0.1)
+    active_count = sum(1 for label in train_labels if label == 1)
+    inactive_count = len(train_labels) - active_count
+    loss_fn.set_class_weights(pos_samples=active_count, neg_samples=inactive_count)
+
     # Tracking variables
-    best_val_loss = float('inf')
+    best_val_f1 = 0.0  
     epochs_without_improvement = 0
     best_epoch = 0
     best_val_acc = 0
+    best_val_precision = 0 
+    best_val_recall = 0
+    best_val_loss = float('inf')  # Track best validation loss for reporting
+
+    # Epoch extension
+    original_num_epochs = num_epochs
+    max_extensions = 2  
+    extension_count = 0
+    epochs_to_extend = 10 
     
     # Lists for metrics history
     train_losses = []
@@ -291,7 +395,8 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
     val_accuracies = []
     
     # Main training loop
-    for epoch in range(num_epochs):
+    epoch = 0
+    while epoch < num_epochs:
         
         # ===== TRAINING PHASE =====
         model.train()
@@ -313,17 +418,46 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
             # Zero gradients
             optimizer.zero_grad()
 
-            # Forward pass
-            outputs = model(inputs)
+            with autocast('cuda'):
+                # Mixup augmentation (50% probability for better generalization)
+                if np.random.rand() < 0.5:  
+                    
+                    # Mixup ratio
+                    lam = np.random.beta(1.0, 1.0)
+                    
+                    # Random permutation of batch
+                    batch_size_actual = inputs.size(0)
+                    index = torch.randperm(batch_size_actual).to(device)
 
-            # Calculate loss
-            loss = loss_fn(outputs, labels.unsqueeze(1))
+                    # Mix inputs
+                    mixed_inputs = lam * inputs + (1 - lam) * inputs[index]
+
+                    # Get both labels
+                    labels_a = labels
+                    labels_b = labels[index]
+
+                    # Forward pass on mixed inputs
+                    outputs = model(mixed_inputs)
+
+                    # Mixed loss
+                    loss = lam * loss_fn(outputs, labels_a.unsqueeze(1)) + (1 - lam) * loss_fn(outputs, labels_b.unsqueeze(1))
+
+                else:
+                    # Normal training
+                    outputs = model(inputs)
+                    loss = loss_fn(outputs, labels.unsqueeze(1))
 
             # Backward pass
-            loss.backward()
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            
+
+            # Gradient clipping
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
 
             # Update weights
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
 
             # Update running metrics
             running_loss += loss.item()
@@ -339,19 +473,13 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
         train_losses.append(epoch_train_loss)
         train_accuracies.append(epoch_train_acc)
 
-        # Step scheduler
-        scheduler.step()
-
-        # Print current learning rate
-        current_lr = optimizer.param_groups[0]['lr']
-
         # ===== VALIDATION PHASE =====
         model.eval()
         
         # Validation metrics
         running_val_loss = 0.0
-        correct_val = 0
-        total_val = 0
+        all_val_preds = []  
+        all_val_labels = [] 
 
         # Progress bar
         val_pbar = tqdm(val_loader, desc=f'Epoch {epoch+1}/{num_epochs} [Val]  ', 
@@ -374,32 +502,52 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
 
                 running_val_loss += loss.item()
                 predicted = (outputs > 0).float()
-                total_val += labels.size(0)
-                correct_val += (predicted == labels.unsqueeze(1)).sum().item()
+                
+                # Collect predictions and labels for metrics
+                all_val_preds.extend(predicted.cpu().numpy())
+                all_val_labels.extend(labels.cpu().numpy())
                 
                 val_pbar.set_postfix({'loss': f'{loss.item():.4f}'})
 
             # Calculate epoch validation metrics
             epoch_val_loss = running_val_loss / len(val_loader)
-            epoch_val_acc = correct_val / total_val
+
+            # Calculate precision, recall, f1
+            from sklearn.metrics import precision_recall_fscore_support, accuracy_score
+            epoch_val_acc = accuracy_score(all_val_labels, all_val_preds)
+            precision, recall, f1, _ = precision_recall_fscore_support(
+                all_val_labels, all_val_preds, average='binary', zero_division=0
+            )
+
+            epoch_val_f1 = f1
 
             # Append to history lists
             val_losses.append(epoch_val_loss)
             val_accuracies.append(epoch_val_acc)
+
+        # Step scheduler based on F1 score
+        scheduler.step(epoch_val_f1)
+        
+        # Get current learning rate
+        current_lr = optimizer.param_groups[0]['lr']
         
         # Print epoch summary
         print(f"Epoch [{epoch+1:2d}/{num_epochs}] | "
-              f"LR: {current_lr:.6f} | "
-              f"Train Loss: {epoch_train_loss:.4f} | Train Acc: {epoch_train_acc:.4f} | "
-              f"Val Loss: {epoch_val_loss:.4f} | Val Acc: {epoch_val_acc:.4f}")
-        
+            f"LR: {current_lr:.6f} | "
+            f"Train Loss: {epoch_train_loss:.4f} | Train Acc: {epoch_train_acc:.4f} | "
+            f"Val Loss: {epoch_val_loss:.4f} | Val Acc: {epoch_val_acc:.4f} | "
+            f"Val F1: {epoch_val_f1:.4f} | Val Prec: {precision:.4f} | Val Rec: {recall:.4f}")
+    
         # ===== EARLY STOPPING & MODEL CHECKPOINTING =====
-        if epoch_val_loss < best_val_loss:
+        if epoch_val_f1 > best_val_f1:
 
             # Update best metrics
-            best_val_loss = epoch_val_loss
+            best_val_f1 = epoch_val_f1 
             best_epoch = epoch + 1
             best_val_acc = epoch_val_acc
+            best_val_precision = precision 
+            best_val_recall = recall
+            best_val_loss = epoch_val_loss  # Track best loss when model is saved
             epochs_without_improvement = 0
 
             # Save model checkpoint
@@ -411,19 +559,33 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
                 'val_loss': epoch_val_loss,
                 'train_acc': epoch_train_acc,
                 'val_acc': epoch_val_acc,
+                'val_f1': epoch_val_f1,      
+                'val_precision': precision,   
+                'val_recall': recall,        
                 'fold': fold_name,
             }, f'saved_models/best_model_fold_{fold_name}.pth')
 
-            print(f"  ✓ New best model saved! (Val Loss: {epoch_val_loss:.4f})")
+            print(f"  ✓ New best model saved! (Val F1: {epoch_val_f1:.4f})")
+
+            if (epoch + 1 >= num_epochs - 2 and 
+                extension_count < max_extensions):
+                num_epochs += epochs_to_extend
+                extension_count += 1
+                print(f"  🔄 Model still improving! Extending training by {epochs_to_extend} epochs")
+                print(f"     New max epochs: {num_epochs} (extension {extension_count}/{max_extensions})")
 
         else:
             epochs_without_improvement += 1
             print(f"  ⚠ No improvement for {epochs_without_improvement} epoch(s)")
             
-            if epochs_without_improvement >= patience:
-                print(f"\n⏹ Early stopping triggered after {epoch + 1} epochs")
-                print(f"Best model was at epoch {best_epoch} with Val Loss: {best_val_loss:.4f}")
-                break
+        epoch += 1
+
+    print(f"\n✅ Training completed after {epoch} epochs")
+    print(f"   Original budget: {original_num_epochs} epochs")
+    if extension_count > 0:
+        print(f"   Extended {extension_count} time(s) for {extension_count * epochs_to_extend} extra epochs")
+    print(f"Best model was at epoch {best_epoch} with Val F1: {best_val_f1:.4f} (Precision: {best_val_precision:.4f}, Recall: {best_val_recall:.4f})")
+
 
     # ===== FINAL TEST EVALUATION (AFTER TRAINING COMPLETES) =====
     print(f"\n{'='*80}")
@@ -441,8 +603,9 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
         test_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=0,
-        pin_memory=True if torch.cuda.is_available() else False
+        num_workers=4,  # Reduced from 8 for Colab stability
+        pin_memory=True if torch.cuda.is_available() else False,
+        prefetch_factor=4  # Reduced from 8
     )
 
     # Evaluate on test set
@@ -487,27 +650,30 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
     print(f"  FN={cm[1,0]}, TP={cm[1,1]}")
 
     print(f"\nFold {fold_name} Complete!")
-    print(f"Best Validation Epoch: {best_epoch} | Val Loss: {best_val_loss:.4f} | Val Acc: {best_val_acc:.4f}")
+    print(f"Best Validation Epoch: {best_epoch} | Val F1: {best_val_f1:.4f} | Val Acc: {best_val_acc:.4f}")
     print(f"Final Test Performance: Test Loss: {final_test_loss:.4f} | Test Acc: {final_test_acc:.4f}")
 
     # Return results for this fold
     return {
         'fold': fold_name,
         'best_epoch': best_epoch,
-        'val_loss': best_val_loss,  # 🆕 CHANGED from test_loss
-        'val_acc': best_val_acc,    # 🆕 CHANGED from test_acc
-        'test_loss': final_test_loss,  # 🆕 NEW - actual test performance
-        'test_acc': final_test_acc,    # 🆕 NEW - actual test performance
-        'precision': precision,         # 🆕 NEW
-        'recall': recall,               # 🆕 NEW
-        'f1': f1,                       # 🆕 NEW
-        'confusion_matrix': cm.tolist(),  # 🆕 NEW
+        'val_loss': best_val_loss,
+        'val_acc': best_val_acc,
+        'val_f1': best_val_f1,          
+        'val_precision': best_val_precision,  
+        'val_recall': best_val_recall,        
+        'test_loss': final_test_loss,
+        'test_acc': final_test_acc,
+        'precision': precision,
+        'recall': recall,
+        'f1': f1,
+        'confusion_matrix': cm.tolist(),
         'train_losses': train_losses,
         'val_losses': val_losses,
         'train_accuracies': train_accuracies,
         'val_accuracies': val_accuracies,
         'num_train_samples': len(train_files),
-        'num_val_samples': len(val_files),  # 🆕 NEW
+        'num_val_samples': len(val_files),
         'num_test_samples': len(test_files),
     }
 
@@ -623,12 +789,13 @@ def main():
     start_time = time.time()
     
     # Configuration parameters
-    NUM_EPOCHS = 15
-    PATIENCE = 5
-    BATCH_SIZE = 16
+    NUM_EPOCHS = 30
+    PATIENCE = 10
+    MAX_EXTENSIONS = 2
+    EXTENSION_EPOCHS = 10
     
     # 🆕 QUICK TEST MODE - Set to False for full nested CV
-    QUICK_TEST = True  # Change to False when ready for full run
+    QUICK_TEST = True
     
     # Setup device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -652,37 +819,37 @@ def main():
     # Print total file count
     total_files = sum(len(files) for files, _ in dataset_dict.values())
     print(f"\nTotal files across all datasets: {total_files}")
-
-    # Hold out D6
-    d6_data = dataset_dict.pop('isolated_cells_D6')
     
     # Fixed hyperparameters (validated by quick test, per Wang et al. 2019)
     # Paper shows nested CV hyperparameter tuning is computationally expensive
     # with minimal performance gain when reasonable defaults are used
-    FIXED_LR = 0.001
-    FIXED_BATCH_SIZE = 16
-    FIXED_WEIGHT_DECAY = 0
+    LR = 0.001
+    BATCH_SIZE = 128  # Sweet spot for speed vs memory on A100
+    WEIGHT_DECAY = 1e-4 
     
+    # Holdout and validation datasets
+    d5_data = dataset_dict.pop('isolated_cells_D5')
+    d6_data = dataset_dict.pop('isolated_cells_D6')
+
+    cv_donor_names = ['isolated_cells_D1', 'isolated_cells_D2', 
+                      'isolated_cells_D3', 'isolated_cells_D4'] 
+
     # Configure based on test mode
     if QUICK_TEST:
         print("\n" + "⚠️ " * 20)
         print("⚠️  QUICK TEST MODE ENABLED")
-        print("⚠️  - Testing only 2 outer folds (D1, D2)")
-        print("⚠️  - Using validated hyperparameters (LR=0.001, BS=16, WD=0)")
-        print("⚠️  - Expected time: ~30-60 minutes")
-        print("⚠️  - Set QUICK_TEST = False for full 5-fold CV")
+        print("⚠️  - Testing only 1 fold (D1 test, D2 val, D3+D4 train)")
+        print("⚠️  - D5 completely held out for final test")
+        print("⚠️  - D6 completely held out for D5 validation")  # ⭐ NEW
+        print("⚠️  - Using validated hyperparameters (LR=0.001, BS=128, WD=0)")
+        print("⚠️  - Expected time: ~15-30 minutes")
+        print("⚠️  - Set QUICK_TEST = False for full 4-fold CV")
         print("⚠️ " * 20 + "\n")
         
-        # 2 folds for quick testing
-        cv_donor_names = ['isolated_cells_D1', 'isolated_cells_D2']
-        print(f"Expected models to train: 2 outer folds = 2 models")
+        print(f"Expected models to train: 1 fold (testing D1 only) + 1 (D5 final)")
     else:
-        cv_donor_names = ['isolated_cells_D1', 'isolated_cells_D2', 'isolated_cells_D3',
-                          'isolated_cells_D4', 'isolated_cells_D5']
-        
-        print(f"\nFull 5-fold CV with fixed hyperparameters")
-        print(f"Expected models to train: {len(cv_donor_names)} outer folds + 1 (D6 final) = {len(cv_donor_names) + 1} models")
-        print(f"Hyperparameters: LR={FIXED_LR}, Batch Size={FIXED_BATCH_SIZE}, Weight Decay={FIXED_WEIGHT_DECAY}")
+        print(f"\nFull 4-fold CV with fixed hyperparameters")  # ⭐ CHANGED from 5-fold
+        print(f"Expected models to train: {len(cv_donor_names)} outer folds + 1 (D5 final)")
     
     # Initialize list to store all results
     all_results = []
@@ -695,10 +862,23 @@ def main():
     # Loop through each dataset as the held-out test fold
     for fold_idx, test_donor in enumerate(cv_donor_names):
         
+        # In quick test mode, only run first fold
+        if QUICK_TEST and fold_idx > 0:
+            print(f"\n⚠️  Skipping fold {fold_idx+1} (quick test mode - only testing first fold)")
+            continue
+        
         fold_start_time = time.time()
         
-        # Split
+        # Split into train/val/test
         available_training_donors = [donor for donor in cv_donor_names if donor != test_donor]
+        
+        # Need at least 2 donors for train+val split
+        if len(available_training_donors) < 2:
+            print(f"\n⚠️  Skipping fold {test_donor} - not enough donors for proper train/val/test split")
+            print(f"    (Need at least 3 total donors, have {len(cv_donor_names)})")
+            continue
+        
+        # Use first available donor as validation, rest for training
         val_donor = available_training_donors[0]
         train_donors = available_training_donors[1:]
         
@@ -706,7 +886,7 @@ def main():
         print(f"\n>>> Test Donor: {test_donor} (Fold {fold_idx+1}/{len(cv_donor_names)})")
         print(f"    Validation Donor: {val_donor}")
         print(f"    Training Donors: {train_donors}")
-        print(f"    Using fixed hyperparameters: LR={FIXED_LR}, BS={FIXED_BATCH_SIZE}, WD={FIXED_WEIGHT_DECAY}")
+        print(f"    Using fixed hyperparameters: LR={LR}, BS={BATCH_SIZE}, WD={WEIGHT_DECAY}")
 
         # Collect data
         train_files = []
@@ -731,16 +911,16 @@ def main():
             device=device,
             num_epochs=NUM_EPOCHS,
             patience=PATIENCE,
-            batch_size=FIXED_BATCH_SIZE,
-            learning_rate=FIXED_LR,
-            weight_decay=FIXED_WEIGHT_DECAY
+            batch_size=BATCH_SIZE,
+            learning_rate=LR,
+            weight_decay=WEIGHT_DECAY
         )
         
         # Store hyperparameters used in this fold
         fold_result['hyperparameters'] = {
-            'learning_rate': FIXED_LR,
-            'batch_size': FIXED_BATCH_SIZE,
-            'weight_decay': FIXED_WEIGHT_DECAY
+            'learning_rate': LR,
+            'batch_size': BATCH_SIZE,
+            'weight_decay': WEIGHT_DECAY
         }
         all_results.append(fold_result)
         
@@ -755,9 +935,9 @@ def main():
             estimated_remaining = avg_time_per_fold * remaining_folds
             print(f"⏱️  Estimated time remaining: {estimated_remaining/3600:.2f} hours ({estimated_remaining/60:.1f} minutes)")
     
-    # ==== Final D6 Generalization Test ====
+    # ==== Final D5 Generalization Test ====
     print("\n" + "="*80)
-    print("FINAL GENERALIZATION TEST ON D6 (COMPLETE HOLDOUT)")
+    print("FINAL GENERALIZATION TEST ON D5 (COMPLETE HOLDOUT)")
     print("="*80)
     
     # Find best overall hyperparameters from outer CV results
@@ -768,30 +948,33 @@ def main():
     print(f"(From fold: {best_fold['fold']} with accuracy: {best_fold['test_acc']:.4f})")
     
     # Combine all 5 CV donors for training
-    print(f"\nTraining on all 5 CV donors: {cv_donor_names}")
-    print(f"Testing on: D6 (never seen before)")
+    print(f"\nTraining on: D1, D2, D3, D4")
+    print(f"Validation on: D6 (completely held out from CV)") 
+    print(f"Testing on: D5 (never seen before)")
     
     final_train_files = []
-    final_train_labels = []
-    
+    final_train_labels = [] 
     for donor in cv_donor_names:
         files, labels = dataset_dict[donor]
         final_train_files.extend(files)
         final_train_labels.extend(labels)
     
-    # Get D6 test data
-    d6_test_files, d6_test_labels = d6_data
+    # Use D6 for validation
+    val_files, val_labels = d6_data
+
+    # Get D5 test data
+    d5_test_files, d5_test_labels = d5_data
     
     # Train final model on all 5 donors with best hyperparameters
-    # For D6: Use same data for both val and test (no separate val donor available)
-    d6_result = train_one_fold(
-        fold_name="D6_FINAL_TEST",
+    # For D5: Use same data for both val and test (no separate val donor available)
+    d5_result = train_one_fold(
+        fold_name="D5_FINAL_TEST",
         train_files=final_train_files,
         train_labels=final_train_labels,
-        val_files=d6_test_files,
-        val_labels=d6_test_labels,
-        test_files=d6_test_files,  # Same as val since D6 is final holdout
-        test_labels=d6_test_labels,
+        val_files=val_files,
+        val_labels=val_labels,
+        test_files=d5_test_files,  
+        test_labels=d5_test_labels,
         device=device,
         num_epochs=NUM_EPOCHS,
         patience=PATIENCE,
@@ -800,35 +983,35 @@ def main():
         weight_decay=best_overall_hyperparams['weight_decay']
     )
     
-    # Print final D6 results
+    # Print final D5 results
     print("\n" + "="*80)
-    print("FINAL D6 GENERALIZATION RESULTS")
+    print("FINAL D5 GENERALIZATION RESULTS")
     print("="*80)
-    print(f"D6 Test Accuracy: {d6_result['test_acc']:.4f}")
-    print(f"D6 Test Loss: {d6_result['test_loss']:.4f}")
-    print(f"Best Epoch: {d6_result['best_epoch']}")
+    print(f"D5 Test Accuracy: {d5_result['test_acc']:.4f}")
+    print(f"D5 Test Loss: {d5_result['test_loss']:.4f}")
+    print(f"Best Epoch: {d5_result['best_epoch']}")
     print(f"Hyperparameters used: {best_overall_hyperparams}")
     
-    # Save D6 results separately
-    d6_results_file = 'saved_models/d6_final_test_results.json'
-    with open(d6_results_file, 'w') as f:
-        d6_json = {
+    # Save D5 results separately
+    d5_results_file = 'saved_models/d5_final_test_results.json'
+    with open(d5_results_file, 'w') as f:
+        d5_json = {
             'timestamp': datetime.now().isoformat(),
-            'test_accuracy': float(d6_result['test_acc']),
-            'test_loss': float(d6_result['test_loss']),
-            'best_epoch': int(d6_result['best_epoch']),
+            'test_accuracy': float(d5_result['test_acc']),
+            'test_loss': float(d5_result['test_loss']),
+            'best_epoch': int(d5_result['best_epoch']),
             'hyperparameters': best_overall_hyperparams,
             'training_donors': cv_donor_names,
-            'num_train_samples': d6_result['num_train_samples'],
-            'num_test_samples': d6_result['num_test_samples'],
-            'train_losses': [float(x) for x in d6_result['train_losses']],
-            'val_losses': [float(x) for x in d6_result['val_losses']],
-            'train_accuracies': [float(x) for x in d6_result['train_accuracies']],
-            'val_accuracies': [float(x) for x in d6_result['val_accuracies']]
+            'num_train_samples': d5_result['num_train_samples'],
+            'num_test_samples': d5_result['num_test_samples'],
+            'train_losses': [float(x) for x in d5_result['train_losses']],
+            'val_losses': [float(x) for x in d5_result['val_losses']],
+            'train_accuracies': [float(x) for x in d5_result['train_accuracies']],
+            'val_accuracies': [float(x) for x in d5_result['val_accuracies']]
         }
-        json.dump(d6_json, f, indent=2)
+        json.dump(d5_json, f, indent=2)
     
-    print(f"\nD6 results saved to: {d6_results_file}")
+    print(f"\nD5 results saved to: {d5_results_file}")
 
     # ==== Summary ====
     print("\n" + "="*80)

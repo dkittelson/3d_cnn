@@ -59,39 +59,40 @@ class ResNet3D(nn.Module):
             nn.Conv3d(1, 32, kernel_size=5, padding=2),
             nn.BatchNorm3d(32),
             nn.ReLU(inplace=True),
-            nn.MaxPool3d(kernel_size=2, stride=2)
+            nn.MaxPool3d(kernel_size=(2, 2, 1), stride=(2, 2, 1)) 
         )
 
         # Stack of Residual Blocks
-        # 32 Channels
+        # 32 Channels (2 blocks instead of 3)
         self.res_block1 = ResBlock3D(in_channels=32, out_channels=32)
         self.res_block2 = ResBlock3D(in_channels=32, out_channels=32)
-        self.res_block3 = ResBlock3D(in_channels=32, out_channels=32)
-        self.pool1 = nn.MaxPool3d(kernel_size=2, stride=2)
+        # Pool only spatial dimensions (H,W), preserve temporal (T)
+        self.pool1 = nn.MaxPool3d(kernel_size=(2, 2, 1), stride=(2, 2, 1))
         self.dropout1 = nn.Dropout3d(p=dropout_rate) 
     
-        # 64 Channels
-        self.res_block4 = ResBlock3D(in_channels=32, out_channels=64)
-        self.res_block5 = ResBlock3D(in_channels=64, out_channels=64)
-        self.res_block6 = ResBlock3D(in_channels=64, out_channels=64)
-        self.pool2 = nn.MaxPool3d(kernel_size=2, stride=2)
+        # 64 Channels 
+        self.res_block3 = ResBlock3D(in_channels=32, out_channels=64)
+        self.res_block4 = ResBlock3D(in_channels=64, out_channels=64)
+        # Pool only spatial dimensions (H,W), preserve temporal (T)
+        self.pool2 = nn.MaxPool3d(kernel_size=(2, 2, 1), stride=(2, 2, 1))
         self.dropout2 = nn.Dropout3d(p=dropout_rate) 
-
-        # 128 Channels
-        self.res_block7 = ResBlock3D(in_channels=64, out_channels=128)
-        self.res_block8 = ResBlock3D(in_channels=128, out_channels=128)
-        self.pool3 = nn.MaxPool3d(kernel_size=2, stride=2)
-        self.dropout3 = nn.Dropout3d(p=dropout_rate) 
 
         # Global Average Pooling
         self.global_pool = nn.AdaptiveAvgPool3d(1)
 
         # Classifier
         self.classifier = nn.Sequential(
-            nn.Linear(128, 64),
+            nn.Linear(64, 64), 
+            nn.BatchNorm1d(64),
             nn.ReLU(inplace=True),
             nn.Dropout(p=dropout_rate),
-            nn.Linear(64, 1),
+
+            nn.Linear(64, 32), 
+            nn.BatchNorm1d(32),
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=dropout_rate),
+
+            nn.Linear(32, 1)  
         )
 
     def forward(self, x):
@@ -107,23 +108,18 @@ class ResNet3D(nn.Module):
         # Initial Convolution Layer
         x = self.initial_conv(x)
         
-        # Stack of Residual Blocks
+        # 🆕 SIMPLIFIED: Only 4 ResBlock layers (was 8)
+        # Stage 1: 32 channels
         x = self.res_block1(x)
         x = self.res_block2(x)
-        x = self.res_block3(x)
         x = self.pool1(x)
         x = self.dropout1(x)
         
+        # Stage 2: 64 channels
+        x = self.res_block3(x)
         x = self.res_block4(x)
-        x = self.res_block5(x)
-        x = self.res_block6(x)
         x = self.pool2(x)
         x = self.dropout2(x)
-
-        x = self.res_block7(x)
-        x = self.res_block8(x)
-        x = self.pool3(x)
-        x = self.dropout3(x)
 
         # Global Average Pooling
         x = self.global_pool(x)
@@ -141,13 +137,15 @@ class ResNet3D(nn.Module):
 def create_model():
     return ResNet3D()
 
-    
-# --- Instantiate the model, loss, and optimizer (for backward compatibility) ---
-model = ResNet3D().to(device)
-loss_fn = nn.BCELoss()  # Binary Cross-Entropy Loss 
-optimizer = optim.Adam(model.parameters(), lr=0.001)
 
-summary(model, input_size=(1, 32, 32, 32))
+# --- Main block to avoid import errors --- #
+if __name__ == "__main__":
+    # Only instantiate model when running this file directly
+    model = ResNet3D().to(device)
+    loss_fn = nn.BCELoss()  # Binary Cross-Entropy Loss 
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    
+    summary(model, input_size=(1, 32, 32, 32))
 
 
 
