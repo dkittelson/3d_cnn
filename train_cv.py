@@ -360,35 +360,14 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
     inactive_count = len(train_labels) - active_count
     print(f"  - Active cells: {active_count} ({active_count/len(train_labels)*100:.1f}%)")
     print(f"  - Inactive cells: {inactive_count} ({inactive_count/len(train_labels)*100:.1f}%)")
-    print(f"  - Focal Loss (alpha=0.5, gamma=2.0) handles class imbalance automatically")
-    print(f"  - No manual resampling needed!\n")
-
-    # === Weighted Random Sampler === #
-    class_counts = [inactive_count, active_count]
-    class_weights = [1.0 / count for count in class_counts]
-
-    # Assign weight to each sample based on its class
-    sample_weights = [class_weights[label] for label in train_labels]
-
-    # Create sampler 
-    sampler = WeightedRandomSampler(
-        weights=sample_weights,
-        num_samples=len(sample_weights),
-        replacement=True
-    )
-
-    print(f"  - WeightedRandomSampler enabled:")
-    print(f"    • Inactive weight: {class_weights[0]:.6f}")
-    print(f"    • Active weight: {class_weights[1]:.6f}")
-    print(f"    • Expected batch distribution: ~50% active, ~50% inactive")
-    print(f"  - Focal Loss (alpha=0.5, gamma=2.0) handles loss weighting\n")
+    print(f"  - Class-Weighted BCE Loss handles imbalance (pos_weight will be calculated below)")
+    print(f"  - Using natural batch distribution (no resampling)\n")
 
     # Create DataLoaders with simple random shuffling
     train_loader = DataLoader(
         train_dataset, 
         batch_size=batch_size, 
-        sampler=sampler,
-        shuffle=False,  
+        shuffle=True,  # Simple random shuffling (no resampling)  
         num_workers=4, 
         pin_memory=True if torch.cuda.is_available() else False,
         persistent_workers=True,  
@@ -655,7 +634,6 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
         print(f"   Extended {extension_count} time(s) for {extension_count * epochs_to_extend} extra epochs")
     print(f"Best model was at epoch {best_epoch} with Val F1: {best_val_f1:.4f} (Precision: {best_val_precision:.4f}, Recall: {best_val_recall:.4f})")
 
-
     # ===== FINAL TEST EVALUATION (AFTER TRAINING COMPLETES) =====
     print(f"\n{'='*80}")
     print(f"FINAL TEST EVALUATION ON {fold_name}")
@@ -677,8 +655,8 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
         prefetch_factor=4
     )
 
-    # ==== OPTION 1: Standard Testing (Faster) ====
-    print("\n[1/2] Standard Testing (Single prediction per sample):")
+    # Standard Testing
+    print("\nTesting on holdout set:")
     test_loss = 0.0
     correct_test = 0
     total_test = 0
@@ -686,14 +664,15 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
     all_labels = []
     
     with torch.no_grad():
-        for inputs, labels in tqdm(test_loader, desc='Standard Testing'):
+        for inputs, labels in tqdm(test_loader, desc='Testing'):
             inputs, labels = inputs.to(device), labels.to(device)
             outputs = model(inputs)
             
             loss = loss_fn(outputs, labels.unsqueeze(1))
             test_loss += loss.item()
             
-            predicted = (torch.sigmoid(outputs) > 0.5).float()
+            probs = torch.sigmoid(outputs)
+            predicted = (probs > 0.5).float()
             total_test += labels.size(0)
             correct_test += (predicted == labels.unsqueeze(1)).sum().item()
             
@@ -709,7 +688,7 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
         all_labels, all_predictions, average='binary', zero_division=0
     )
     
-    print(f"\n📊 Standard Test Results:")
+    print(f"\n📊 Test Results:")
     print(f"  Test Loss: {final_test_loss:.4f}")
     print(f"  Test Accuracy: {final_test_acc:.4f}")
     print(f"  Precision: {precision:.4f}")
@@ -864,7 +843,7 @@ def main():
     NUM_EPOCHS = 75
     PATIENCE = 15
     LR = 0.001
-    BATCH_SIZE = 128  
+    BATCH_SIZE = 16
     WEIGHT_DECAY = 1e-3
     
     QUICK_TEST = True
