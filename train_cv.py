@@ -40,12 +40,19 @@ from datetime import datetime
 from sklearn.metrics import confusion_matrix, precision_recall_fscore_support
 import torch.nn.functional as F
 from torch.amp import autocast, GradScaler  
+from torch.utils.data import WeightedRandomSampler
+import pickle
+import hashlib
 
 # Enable TF32 for faster matmul on A100 GPUs (10-20% speedup)
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
 from resnet import create_model
+
+# Cache directory for preprocessed data
+CACHE_DIR = Path('./cache')
+CACHE_DIR.mkdir(exist_ok=True)
 
 
 # ============================================================================
@@ -137,34 +144,56 @@ class CellDataset(Dataset):
         return np.ascontiguousarray(array)
     
     def __getitem__(self, idx):
-        # Load file
-        array = np.load(self.file_paths[idx])
+        import hashlib
+        from pathlib import Path
         
-        # Apply augmentation BEFORE normalization (important for FLIM!)
-        # Spatial augmentations don't change total photons
+        file_path = self.file_paths[idx]
+        
+        # Create cache key based on file path
+        cache_dir = Path('./cache')
+        cache_key = hashlib.md5(str(file_path).encode()).hexdigest()
+        cache_file = cache_dir / f"{cache_key}.pkl"
+        
+        # Try to load from cache (only for non-augmented data)
+        if not self.augment and cache_file.exists():
+            with open(cache_file, 'rb') as f:
+                array = pickle.load(f)
+        else:
+            # Load file
+            array = np.load(file_path)
+            
+            # Cache the raw array if not augmenting
+            if not self.augment:
+                with open(cache_file, 'wb') as f:
+                    pickle.dump(array, f)
+        
         if self.augment:
             array = self.apply_augmentation(array)
         
-        # FLIM-specific normalization: Normalize each timepoint independently
-        # This preserves the temporal decay shape (what encodes metabolic state)
-        # while removing spatial brightness variation between cells
-        array = array.astype(np.float32)
-        for t in range(array.shape[2]):  # For each timepoint
-            timepoint = array[:, :, t]
-            total = np.sum(timepoint)
-            if total > 0:
-                array[:, :, t] = timepoint / total  # Each timepoint sums to 1.0
-            # If timepoint is empty, leave as zeros
+        # Sum across time axis
+        total_photons_per_pixel = np.sum(array, axis=2, keepdims=True)
+        total_photons_per_pixel = np.where(
+            total_photons_per_pixel == 0, 
+            1.0,
+            total_photons_per_pixel
+        )
+
+        # Normalize
+        array = array / total_photons_per_pixel
+
+        # Transpose to (Time, Height, Width) for 3D CNN
+        array = np.transpose(array, (2, 0, 1))
 
         # Add channel dimension
-        array = np.expand_dims(array, axis=-1)
+        array = np.expand_dims(array, axis=0)
 
-        # Convert to torch tensors
+        # Convert to PyTorch tensors 
         X = torch.tensor(array, dtype=torch.float32)
         y = torch.tensor(self.labels[idx], dtype=torch.float32)
 
         return X, y
     
+
 # ============================================================================
 # FOCAL LOSS FUNCTION
 # ============================================================================
@@ -334,15 +363,36 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
     print(f"  - Focal Loss (alpha=0.5, gamma=2.0) handles class imbalance automatically")
     print(f"  - No manual resampling needed!\n")
 
+    # === Weighted Random Sampler === #
+    class_counts = [inactive_count, active_count]
+    class_weights = [1.0 / count for count in class_counts]
+
+    # Assign weight to each sample based on its class
+    sample_weights = [class_weights[label] for label in train_labels]
+
+    # Create sampler 
+    sampler = WeightedRandomSampler(
+        weights=sample_weights,
+        num_samples=len(sample_weights),
+        replacement=True
+    )
+
+    print(f"  - WeightedRandomSampler enabled:")
+    print(f"    • Inactive weight: {class_weights[0]:.6f}")
+    print(f"    • Active weight: {class_weights[1]:.6f}")
+    print(f"    • Expected batch distribution: ~50% active, ~50% inactive")
+    print(f"  - Focal Loss (alpha=0.5, gamma=2.0) handles loss weighting\n")
+
     # Create DataLoaders with simple random shuffling
     train_loader = DataLoader(
         train_dataset, 
         batch_size=batch_size, 
-        shuffle=True,  # Simple random shuffling - Focal Loss handles imbalance  
-        num_workers=4,  # Optimal for Colab
+        sampler=sampler,
+        shuffle=False,  
+        num_workers=4, 
         pin_memory=True if torch.cuda.is_available() else False,
-        persistent_workers=True,  # Keeps workers alive between epochs (much faster)
-        prefetch_factor=2  # Lower prefetch for persistent workers
+        persistent_workers=True,  
+        prefetch_factor=2  
     )
     val_loader = DataLoader(
         val_dataset, 
@@ -356,25 +406,34 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
 
     # Create fresh model
     model = create_model().to(device)
+    
     optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay) 
 
     # Initialize gradient scaler for mixed precision
     scaler = GradScaler(device.type)  
     
-    # ReduceLROnPlateau Scheduler
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(   
+    # ReduceLROnPlateau Scheduler (validation-based, stable for domain shift)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
-        mode='max',           # Maximize F1 score
-        factor=0.5,           # Multiply LR by 0.5 when plateau detected
-        patience=5,           # Wait 5 epochs without improvement
+        mode='max',           # Maximize validation F1
+        factor=0.5,           # Reduce LR by half
+        patience=5,           # Wait 5 epochs before reducing
         min_lr=1e-6           # Don't go below this
-    )
+    )   
 
-    # Focal Loss
-    loss_fn = FocalLoss(gamma=2.0, auto_balance=True, label_smoothing=0.1)
+    # Class-Weighted BCE Loss (standard for moderate class imbalance)
     active_count = sum(1 for label in train_labels if label == 1)
     inactive_count = len(train_labels) - active_count
-    loss_fn.set_class_weights(pos_samples=active_count, neg_samples=inactive_count)
+    
+    # Calculate pos_weight: ratio of negative to positive samples
+    # This makes the model care equally about both classes
+    pos_weight = torch.tensor([inactive_count / active_count]).to(device)
+    loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    
+    print(f"  ✓ Class-weighted BCE Loss initialized")
+    print(f"    • Positive weight: {pos_weight.item():.3f}")
+    print(f"    • Dataset: {active_count} active ({active_count/len(train_labels)*100:.1f}%), {inactive_count} inactive ({inactive_count/len(train_labels)*100:.1f}%)")
+    print(f"    • This weight ensures equal importance for both classes")
 
     # Tracking variables
     best_val_f1 = 0.0  
@@ -422,11 +481,11 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
             optimizer.zero_grad()
 
             with autocast('cuda'):
-                # Mixup augmentation (50% probability for better generalization)
-                if np.random.rand() < 0.5:  
+                # Mixup augmentation
+                if np.random.rand() < 0.5:  # 50% probability
                     
                     # Mixup ratio
-                    lam = np.random.beta(1.0, 1.0)
+                    lam = np.random.beta(1.0, 1.0)  # Uniform mixing
                     
                     # Random permutation of batch
                     batch_size_actual = inputs.size(0)
@@ -464,7 +523,8 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
 
             # Update running metrics
             running_loss += loss.item()
-            predicted = (outputs > 0).float()
+            # Track accuracy
+            predicted = (torch.sigmoid(outputs) > 0.5).float()
             total_train += labels.size(0)
             correct_train += (predicted == labels.unsqueeze(1)).sum().item()
         
@@ -504,7 +564,7 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
                 loss = loss_fn(outputs, labels.unsqueeze(1))
 
                 running_val_loss += loss.item()
-                predicted = (outputs > 0).float()
+                predicted = (torch.sigmoid(outputs) > 0.5).float()
                 
                 # Collect predictions and labels for metrics
                 all_val_preds.extend(predicted.cpu().numpy())
@@ -528,7 +588,7 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
             val_losses.append(epoch_val_loss)
             val_accuracies.append(epoch_val_acc)
 
-        # Step scheduler based on F1 score
+        # Step scheduler based on validation F1 (ReduceLROnPlateau)
         scheduler.step(epoch_val_f1)
         
         # Get current learning rate
@@ -610,11 +670,11 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
     test_dataset = CellDataset(test_files, test_labels, augment=False)
     test_loader = DataLoader(
         test_dataset,
-        batch_size=batch_size,
+        batch_size=batch_size * 4,  # 4x larger batch for testing (no gradients needed)
         shuffle=False,
-        num_workers=4,  # Reduced from 8 for Colab stability
+        num_workers=4,
         pin_memory=True if torch.cuda.is_available() else False,
-        prefetch_factor=4  # Reduced from 8
+        prefetch_factor=4
     )
 
     # ==== OPTION 1: Standard Testing (Faster) ====
@@ -633,7 +693,7 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
             loss = loss_fn(outputs, labels.unsqueeze(1))
             test_loss += loss.item()
             
-            predicted = (outputs > 0).float()
+            predicted = (torch.sigmoid(outputs) > 0.5).float()
             total_test += labels.size(0)
             correct_test += (predicted == labels.unsqueeze(1)).sum().item()
             
@@ -659,40 +719,11 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
     print(f"    TN={cm[0,0]}, FP={cm[0,1]}")
     print(f"    FN={cm[1,0]}, TP={cm[1,1]}")
 
-    # ==== OPTION 2: Test-Time Augmentation (Better Accuracy) ====
-    print(f"\n[2/2] Test-Time Augmentation (TTA):")
-    tta_results = test_with_tta(
-        model=model,
-        test_loader=test_loader,
-        loss_fn=loss_fn,
-        device=device,
-        num_augmentations=5  # 5 augmentations: original + 4 rotations
-    )
-    
-    print(f"\n📊 TTA Test Results:")
-    print(f"  Test Loss: {tta_results['test_loss']:.4f}")
-    print(f"  Test Accuracy: {tta_results['test_acc']:.4f}")
-    print(f"  Precision: {tta_results['precision']:.4f}")
-    print(f"  Recall: {tta_results['recall']:.4f}")
-    print(f"  F1-Score: {tta_results['f1']:.4f}")
-    print(f"\n  Confusion Matrix:")
-    cm_tta = tta_results['confusion_matrix']
-    print(f"    TN={cm_tta[0,0]}, FP={cm_tta[0,1]}")
-    print(f"    FN={cm_tta[1,0]}, TP={cm_tta[1,1]}")
-    
-    # Show improvement
-    acc_improvement = tta_results['test_acc'] - final_test_acc
-    f1_improvement = tta_results['f1'] - f1
-    print(f"\n✨ TTA Improvement:")
-    print(f"  Accuracy: {acc_improvement:+.4f} ({acc_improvement*100:+.2f}%)")
-    print(f"  F1-Score: {f1_improvement:+.4f} ({f1_improvement*100:+.2f}%)")
-
     print(f"\nFold {fold_name} Complete!")
     print(f"Best Validation Epoch: {best_epoch} | Val F1: {best_val_f1:.4f} | Val Acc: {best_val_acc:.4f}")
-    print(f"Standard Test: Acc={final_test_acc:.4f} | F1={f1:.4f}")
-    print(f"TTA Test:      Acc={tta_results['test_acc']:.4f} | F1={tta_results['f1']:.4f}")
+    print(f"Test: Acc={final_test_acc:.4f} | F1={f1:.4f}")
 
-    # Return results with both standard and TTA metrics
+    # Return results
     return {
         'fold': fold_name,
         'best_epoch': best_epoch,
@@ -701,161 +732,22 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
         'val_f1': best_val_f1,          
         'val_precision': best_val_precision,  
         'val_recall': best_val_recall,
-        # Standard test results
+        # Test results
         'test_loss': final_test_loss,
         'test_acc': final_test_acc,
         'precision': precision,
         'recall': recall,
         'f1': f1,
         'confusion_matrix': cm.tolist(),
-        # TTA test results
-        'tta_test_loss': tta_results['test_loss'],
-        'tta_test_acc': tta_results['test_acc'],
-        'tta_precision': tta_results['precision'],
-        'tta_recall': tta_results['recall'],
-        'tta_f1': tta_results['f1'],
-        'tta_confusion_matrix': tta_results['confusion_matrix'].tolist(),
-        'tta_improvement': acc_improvement,
-        # Other metadata
+        # Training history
         'train_losses': train_losses,
         'val_losses': val_losses,
         'train_accuracies': train_accuracies,
         'val_accuracies': val_accuracies,
+        # Metadata
         'num_train_samples': len(train_files),
         'num_val_samples': len(val_files),
         'num_test_samples': len(test_files),
-        'confusion_matrix': cm.tolist(),
-        'train_losses': train_losses,
-        'val_losses': val_losses,
-        'train_accuracies': train_accuracies,
-        'val_accuracies': val_accuracies,
-        'num_train_samples': len(train_files),
-        'num_val_samples': len(val_files),
-        'num_test_samples': len(test_files),
-    }
-
-# ============================================================================
-# TTA
-# ============================================================================
-def test_with_tta(model, test_loader, loss_fn, device, num_augmentations=5):
-    """
-    Test-Time Augmentation: Evaluate model with multiple augmented views
-    """
-    model.eval()
-    
-    # TTA augmentation functions
-    def get_tta_augmentations(array_np):
-        augmentations = []
-        
-        # 1. Original (no augmentation)
-        augmentations.append(array_np.copy())
-        
-        # 2. Rotate 90° (k=1)
-        aug = np.rot90(array_np, k=1, axes=(0, 1)).copy()
-        augmentations.append(aug)
-        
-        # 3. Rotate 180° (k=2)
-        aug = np.rot90(array_np, k=2, axes=(0, 1)).copy()
-        augmentations.append(aug)
-        
-        # 4. Rotate 270° (k=3)
-        aug = np.rot90(array_np, k=3, axes=(0, 1)).copy()
-        augmentations.append(aug)
-        
-        # 5. Horizontal flip
-        aug = np.flip(array_np, axis=0).copy()
-        augmentations.append(aug)
-        
-        # 6. Vertical flip
-        if num_augmentations > 5:
-            aug = np.flip(array_np, axis=1).copy()
-            augmentations.append(aug)
-        
-        # 7. Diagonal flip (rotate + flip)
-        if num_augmentations > 6:
-            aug = np.rot90(array_np, k=1, axes=(0, 1))
-            aug = np.flip(aug, axis=0).copy()
-            augmentations.append(aug)
-        
-        # 8. Anti-diagonal flip
-        if num_augmentations > 7:
-            aug = np.rot90(array_np, k=1, axes=(0, 1))
-            aug = np.flip(aug, axis=1).copy()
-            augmentations.append(aug)
-        
-        return augmentations[:num_augmentations]
-    
-    # Metrics tracking
-    test_loss = 0.0
-    all_predictions = []
-    all_labels = []
-
-    print(f"\n🔄 Running Test-Time Augmentation with {num_augmentations} augmentations per sample...")
-
-    with torch.no_grad():
-        for inputs, labels in tqdm(test_loader, desc='TTA Testing'):
-            batch_size = inputs.size(0)
-            labels = labels.to(device)
-            
-            # Store predictions for each augmentation
-            batch_predictions = []
-            
-            # For each sample in the batch
-            for sample_idx in range(batch_size):
-                # Get single sample (already normalized from DataLoader)
-                sample = inputs[sample_idx].cpu().numpy()  # Shape: (H, W, T, 1)
-                sample = sample.squeeze(-1)  # Remove channel dim: (H, W, T)
-                
-                # Generate augmented versions
-                augmented_samples = get_tta_augmentations(sample)
-                
-                # Predict on each augmentation
-                aug_predictions = []
-                for aug_sample in augmented_samples:
-                    # Add batch and channel dimensions
-                    aug_tensor = torch.from_numpy(aug_sample).unsqueeze(0).unsqueeze(-1).float()
-                    aug_tensor = aug_tensor.to(device)
-                    
-                    # Get prediction
-                    output = model(aug_tensor)
-                    aug_predictions.append(torch.sigmoid(output).item())
-                
-                # Average predictions across augmentations
-                avg_prediction = np.mean(aug_predictions)
-                batch_predictions.append(avg_prediction)
-            
-            # Convert to tensor
-            batch_pred_tensor = torch.tensor(batch_predictions).unsqueeze(1).to(device)
-            
-            # Calculate loss (on averaged predictions)
-            loss = loss_fn(batch_pred_tensor, labels.unsqueeze(1))
-            test_loss += loss.item()
-            
-            # Binary predictions (threshold at 0.5)
-            binary_preds = (batch_pred_tensor > 0.5).float()
-            
-            # Collect for metrics
-            all_predictions.extend(binary_preds.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
-    
-    # Calculate metrics
-    final_test_loss = test_loss / len(test_loader)
-    
-    from sklearn.metrics import confusion_matrix, precision_recall_fscore_support, accuracy_score
-    
-    final_test_acc = accuracy_score(all_labels, all_predictions)
-    cm = confusion_matrix(all_labels, all_predictions)
-    precision, recall, f1, _ = precision_recall_fscore_support(
-        all_labels, all_predictions, average='binary', zero_division=0
-    )
-    
-    return {
-        'test_loss': final_test_loss,
-        'test_acc': final_test_acc,
-        'precision': precision,
-        'recall': recall,
-        'f1': f1,
-        'confusion_matrix': cm
     }
 
 # ============================================================================
@@ -969,12 +861,12 @@ def main():
     start_time = time.time()
     
     # Configuration parameters
-    NUM_EPOCHS = 30
-    PATIENCE = 10
-    MAX_EXTENSIONS = 2
-    EXTENSION_EPOCHS = 10
+    NUM_EPOCHS = 75
+    PATIENCE = 15
+    LR = 0.001
+    BATCH_SIZE = 128  
+    WEIGHT_DECAY = 1e-3
     
-    # 🆕 QUICK TEST MODE - Set to False for full nested CV
     QUICK_TEST = True
     
     # Setup device
@@ -999,13 +891,6 @@ def main():
     # Print total file count
     total_files = sum(len(files) for files, _ in dataset_dict.values())
     print(f"\nTotal files across all datasets: {total_files}")
-    
-    # Fixed hyperparameters (validated by quick test, per Wang et al. 2019)
-    # Paper shows nested CV hyperparameter tuning is computationally expensive
-    # with minimal performance gain when reasonable defaults are used
-    LR = 0.0001
-    BATCH_SIZE = 128  
-    WEIGHT_DECAY = 1e-3
     
     # Holdout and validation datasets
     d5_data = dataset_dict.pop('isolated_cells_D5')
@@ -1155,8 +1040,12 @@ def main():
     # Get D5 test data
     d5_test_files, d5_test_labels = d5_data
     
-    # Train final model on all 5 donors with best hyperparameters
-    # For D5: Use same data for both val and test (no separate val donor available)
+    # Train final model on all CV donors with best hyperparameters
+    print("\n" + "="*80)
+    print("TRAINING FINAL MODEL ON ALL CV DATA (D1+D2+D3+D4)")
+    print("Testing on D5 (Complete Holdout)")
+    print("="*80)
+    
     d5_result = train_one_fold(
         fold_name="D5_FINAL_TEST",
         train_files=final_train_files,
@@ -1177,14 +1066,10 @@ def main():
     print("\n" + "="*80)
     print("FINAL D5 GENERALIZATION RESULTS")
     print("="*80)
-    print(f"\n📊 Standard Testing:")
+    print(f"\n📊 Testing Results:")
     print(f"  D5 Test Accuracy: {d5_result['test_acc']:.4f}")
     print(f"  D5 Test F1:       {d5_result['f1']:.4f}")
     print(f"  D5 Test Loss:     {d5_result['test_loss']:.4f}")
-    print(f"\n🚀 Test-Time Augmentation (TTA):")
-    print(f"  D5 TTA Accuracy:  {d5_result['tta_test_acc']:.4f} ({d5_result['tta_improvement']:+.4f})")
-    print(f"  D5 TTA F1:        {d5_result['tta_f1']:.4f}")
-    print(f"  D5 TTA Loss:      {d5_result['tta_test_loss']:.4f}")
     print(f"\n⚙️  Training Details:")
     print(f"  Best Epoch: {d5_result['best_epoch']}")
     print(f"  Hyperparameters: {best_overall_hyperparams}")
@@ -1194,19 +1079,12 @@ def main():
     with open(d5_results_file, 'w') as f:
         d5_json = {
             'timestamp': datetime.now().isoformat(),
-            # Standard test results
+            # Test results
             'test_accuracy': float(d5_result['test_acc']),
             'test_f1': float(d5_result['f1']),
             'test_precision': float(d5_result['precision']),
             'test_recall': float(d5_result['recall']),
             'test_loss': float(d5_result['test_loss']),
-            # TTA test results
-            'tta_test_accuracy': float(d5_result['tta_test_acc']),
-            'tta_test_f1': float(d5_result['tta_f1']),
-            'tta_test_precision': float(d5_result['tta_precision']),
-            'tta_test_recall': float(d5_result['tta_recall']),
-            'tta_test_loss': float(d5_result['tta_test_loss']),
-            'tta_improvement': float(d5_result['tta_improvement']),
             # Training details
             'best_epoch': int(d5_result['best_epoch']),
             'hyperparameters': best_overall_hyperparams,

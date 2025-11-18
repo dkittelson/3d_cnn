@@ -7,12 +7,7 @@ import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
 import matplotlib.pyplot as plt
 from torchsummary import summary
-
-# Only import device if prepare_data is available (for backward compatibility)
-try:
-    from train import device
-except ImportError:
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # --- Define the Residual Block --- #
 class ResBlock3D(nn.Module):
