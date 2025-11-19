@@ -54,10 +54,11 @@ from resnet import create_model
 CACHE_DIR = Path('./cache')
 CACHE_DIR.mkdir(exist_ok=True)
 
-
 # ============================================================================
 # DATASET CLASS
 # ============================================================================
+GLOBAL_INTENSITY_MIN = 0.0
+GLOBAL_INTENSITY_MAX = 8.2212
 
 class CellDataset(Dataset):
     """Custom Dataset that loads data on-the-fly"""
@@ -178,85 +179,37 @@ class CellDataset(Dataset):
             total_photons_per_pixel
         )
 
-        # Normalize
-        array = array / total_photons_per_pixel
+        # Channel 0: Normalized decay shape
+        decay_normalized = np.zeros_like(array, dtype=np.float32)
+        for i in range(array.shape[0]):
+            for j in range(array.shape[1]):
+                pixel_sum = array[i, j, :].sum()
+                if pixel_sum > 0:
+                    decay_normalized[i, j, :] = array[i, j, :] / pixel_sum
 
-        # Transpose to (Time, Height, Width) for 3D CNN
-        array = np.transpose(array, (2, 0, 1))
+        # Channel 1: Log-intensity map 
+        intensity_map = array.sum(axis=2)  # Total photons per pixel
+        log_intensity = np.log1p(intensity_map)  # Log transform to compress range
+        
+        # This preserves relative brightness: bright cells stay bright, dim cells stay dim
+        log_intensity = (log_intensity - GLOBAL_INTENSITY_MIN) / (GLOBAL_INTENSITY_MAX - GLOBAL_INTENSITY_MIN)
+        log_intensity = np.clip(log_intensity, 0, 1)  # Ensure [0, 1] range
 
-        # Add channel dimension
-        array = np.expand_dims(array, axis=0)
+        # Expand intensity to match temporal dimensions
+        log_intensity_expanded = np.tile(log_intensity[:, :, np.newaxis], (1, 1, array.shape[2]))
+
+        # Tranpose to (Time, Height, Width) for CNN
+        decay_normalized = np.transpose(decay_normalized, (2, 0, 1))
+        log_intensity_expanded = np.transpose(log_intensity_expanded, (2, 0, 1))
+
+        # Stack as 2 channels (2, 256, 21, 21)
+        array = np.stack([decay_normalized, log_intensity_expanded], axis=0)
 
         # Convert to PyTorch tensors 
         X = torch.tensor(array, dtype=torch.float32)
         y = torch.tensor(self.labels[idx], dtype=torch.float32)
 
         return X, y
-    
-
-# ============================================================================
-# FOCAL LOSS FUNCTION
-# ============================================================================
-
-class FocalLoss(nn.Module):
-    "Focal Loss for handling class imbalances and overal generalization"
-    def __init__(self, gamma=2.0, auto_balance=True, label_smoothing=0.1):
-        super(FocalLoss, self).__init__()
-        self.gamma = gamma
-        self.auto_balance = auto_balance
-        self.alpha = None
-        self.label_smoothing = label_smoothing
-
-    def set_class_weights(self, pos_samples, neg_samples):
-        total = pos_samples + neg_samples
-        self.alpha = neg_samples / total
-
-        print(f"  ✓ Dynamic alpha computed: {self.alpha:.3f}")
-        print(f"    (Positive weight: {self.alpha:.3f}, Negative weight: {1-self.alpha:.3f})")
-        print(f"    Dataset: {pos_samples} active ({pos_samples/total*100:.1f}%), "
-              f"{neg_samples} inactive ({neg_samples/total*100:.1f}%)")
-
-    def forward(self, inputs, targets):
-            """Compute focal loss."""
-
-            # Ensure targets have correct shape
-            targets = targets.view(-1, 1).float()
-            if self.label_smoothing > 0:
-                targets = targets * (1 - self.label_smoothing) + 0.5 * self.label_smoothing
-
-              # Compute BCE Loss 
-            bce_loss = F.binary_cross_entropy_with_logits(
-                inputs, targets, reduction="none"
-            )
-
-            # Get probability of CORRECT class (sigmoid)
-            probs = torch.sigmoid(inputs)
-
-            # Calculate probability of the SPECIFIC class
-            # If target=1 (active), p_t = prob
-            # If target=0 (inactive), p_t = 1 - prob
-            p_t = probs * targets + (1 - probs) * (1 - targets)
-
-            # Calculate focal weights
-            # - Easy samples (p_t close to 1): weight → 0 (ignored)
-            # - Hard samples (p_t close to 0): weight → 1 (focused on)
-            focal_weight = (1 - p_t) ** self.gamma
-
-            # Calculate alpha weight to balance classes
-            if self.auto_balance and self.alpha is not None:
-                alpha_t = self.alpha * targets + (1 - self.alpha) * (1 - targets)
-            else:
-                alpha_t = 0.5
-
-            # Combines all components
-            focal_loss = alpha_t * focal_weight * bce_loss
-
-            # Return mean loss
-            return focal_loss.mean()
-
-    def __repr__(self):
-        alpha_str = f"{self.alpha:.3f}" if self.alpha else "auto"
-        return f"FocalLoss(alpha={alpha_str}, gamma={self.gamma})" 
 
 # ============================================================================
 # DATA COLLECTION BY FOLDER
@@ -359,15 +312,33 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
     active_count = sum(1 for label in train_labels if label == 1)
     inactive_count = len(train_labels) - active_count
     print(f"  - Active cells: {active_count} ({active_count/len(train_labels)*100:.1f}%)")
-    print(f"  - Inactive cells: {inactive_count} ({inactive_count/len(train_labels)*100:.1f}%)")
-    print(f"  - Class-Weighted BCE Loss handles imbalance (pos_weight will be calculated below)")
-    print(f"  - Using natural batch distribution (no resampling)\n")
+    print(f"  - Inactive cells: {inactive_count} ({inactive_count/len(train_labels)*100:.1f}%)") 
+    print(f"  - Using WeightedRandomSampler for balanced 50/50 batches")
+    print(f"  - NO pos_weight in loss (sampler handles imbalance)\n")
 
-    # Create DataLoaders with simple random shuffling
+    # WeightedRandomSampler for balanced batches
+    sample_weights = []
+    active_count_total = sum(1 for label in train_labels if label == 1)
+    inactive_count_total = len(train_labels) - active_count_total
+    
+    for label in train_labels:
+        if label == 1:  # Active
+            weight = 1.0 / active_count_total
+        else:  # Inactive  
+            weight = 1.0 / inactive_count_total
+        sample_weights.append(weight)
+    
+    sampler = WeightedRandomSampler(
+        weights=sample_weights,
+        num_samples=len(train_dataset),
+        replacement=True
+    )
+
+    # Create DataLoaders with WeightedRandomSampler
     train_loader = DataLoader(
         train_dataset, 
         batch_size=batch_size, 
-        shuffle=True,  # Simple random shuffling (no resampling)  
+        sampler=sampler,  # Use sampler instead of shuffle
         num_workers=4, 
         pin_memory=True if torch.cuda.is_available() else False,
         persistent_workers=True,  
@@ -384,7 +355,7 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
     )
 
     # Create fresh model
-    model = create_model().to(device)
+    model = create_model(in_channels=2).to(device)
     
     optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay) 
 
@@ -400,19 +371,16 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
         min_lr=1e-6           # Don't go below this
     )   
 
-    # Class-Weighted BCE Loss (standard for moderate class imbalance)
+    # Standard BCE Loss (no pos_weight - balanced by sampler)
     active_count = sum(1 for label in train_labels if label == 1)
     inactive_count = len(train_labels) - active_count
     
-    # Calculate pos_weight: ratio of negative to positive samples
-    # This makes the model care equally about both classes
-    pos_weight = torch.tensor([inactive_count / active_count]).to(device)
-    loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    loss_fn = nn.BCEWithLogitsLoss()  # Default weight=1.0
     
-    print(f"  ✓ Class-weighted BCE Loss initialized")
-    print(f"    • Positive weight: {pos_weight.item():.3f}")
+    print(f"  ✓ Standard BCE Loss initialized (no pos_weight)")
+    print(f"    • WeightedRandomSampler creates balanced 50/50 batches")
     print(f"    • Dataset: {active_count} active ({active_count/len(train_labels)*100:.1f}%), {inactive_count} inactive ({inactive_count/len(train_labels)*100:.1f}%)")
-    print(f"    • This weight ensures equal importance for both classes")
+    print(f"    • Sampler handles imbalance naturally without loss weighting")
 
     # Tracking variables
     best_val_f1 = 0.0  
@@ -460,33 +428,9 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
             optimizer.zero_grad()
 
             with autocast('cuda'):
-                # Mixup augmentation
-                if np.random.rand() < 0.5:  # 50% probability
-                    
-                    # Mixup ratio
-                    lam = np.random.beta(1.0, 1.0)  # Uniform mixing
-                    
-                    # Random permutation of batch
-                    batch_size_actual = inputs.size(0)
-                    index = torch.randperm(batch_size_actual).to(device)
-
-                    # Mix inputs
-                    mixed_inputs = lam * inputs + (1 - lam) * inputs[index]
-
-                    # Get both labels
-                    labels_a = labels
-                    labels_b = labels[index]
-
-                    # Forward pass on mixed inputs
-                    outputs = model(mixed_inputs)
-
-                    # Mixed loss
-                    loss = lam * loss_fn(outputs, labels_a.unsqueeze(1)) + (1 - lam) * loss_fn(outputs, labels_b.unsqueeze(1))
-
-                else:
-                    # Normal training
-                    outputs = model(inputs)
-                    loss = loss_fn(outputs, labels.unsqueeze(1))
+                # Simple forward pass (no mixup, no label smoothing)
+                outputs = model(inputs)
+                loss = loss_fn(outputs, labels.float().unsqueeze(1))
 
             # Backward pass
             scaler.scale(loss).backward()
@@ -655,29 +599,108 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
         prefetch_factor=4
     )
 
-    # Standard Testing
-    print("\nTesting on holdout set:")
+    # Test-Time Augmentation (TTA) Helper
+    def predict_tta(model, inputs):
+        """Apply test-time augmentation and average predictions"""
+        model.eval()
+        predictions = []
+        
+        # Original
+        with torch.no_grad():
+            pred = torch.sigmoid(model(inputs))
+            predictions.append(pred)
+        
+        # Rotate 90°
+        with torch.no_grad():
+            rotated = torch.rot90(inputs, k=1, dims=[3, 4])  # Rotate H×W plane
+            pred = torch.sigmoid(model(rotated))
+            predictions.append(pred)
+        
+        # Flip Horizontal
+        with torch.no_grad():
+            flipped_h = torch.flip(inputs, dims=[4])  # Flip width
+            pred = torch.sigmoid(model(flipped_h))
+            predictions.append(pred)
+        
+        # Flip Vertical
+        with torch.no_grad():
+            flipped_v = torch.flip(inputs, dims=[3])  # Flip height
+            pred = torch.sigmoid(model(flipped_v))
+            predictions.append(pred)
+        
+        # Average all predictions
+        avg_pred = torch.stack(predictions).mean(dim=0)
+        return avg_pred
+
+    # Dynamic Threshold Tuning with K-Means
+    def tune_threshold(model, val_loader, device):
+        """Find optimal threshold using K-Means clustering on validation probabilities"""
+        from sklearn.cluster import KMeans
+        
+        print("\n🔧 Tuning decision threshold with K-Means...")
+        model.eval()
+        all_probs = []
+        
+        with torch.no_grad():
+            for inputs, _ in tqdm(val_loader, desc='Collecting val probabilities', leave=False):
+                inputs = inputs.to(device)
+                # Use TTA for more robust probabilities
+                probs = predict_tta(model, inputs)
+                all_probs.extend(probs.cpu().numpy().flatten())
+        
+        # Reshape for K-Means (needs 2D array)
+        probs_array = np.array(all_probs).reshape(-1, 1)
+        
+        # K-Means with k=2 (active vs inactive clusters)
+        kmeans = KMeans(n_clusters=2, random_state=42, n_init=10)
+        kmeans.fit(probs_array)
+        
+        # Get cluster centers
+        centers = sorted(kmeans.cluster_centers_.flatten())
+        inactive_center = centers[0]
+        active_center = centers[1]
+        
+        # Optimal threshold = midpoint between clusters
+        optimal_threshold = (inactive_center + active_center) / 2.0
+        
+        print(f"  Inactive cluster center: {inactive_center:.4f}")
+        print(f"  Active cluster center:   {active_center:.4f}")
+        print(f"  ✓ Optimal threshold:     {optimal_threshold:.4f}")
+        
+        return optimal_threshold
+
+    # Tune threshold on validation set
+    optimal_threshold = tune_threshold(model, val_loader, device)
+
+    # Testing with TTA and Dynamic Threshold
+    print(f"\nTesting on holdout set (with TTA + threshold={optimal_threshold:.4f}):")
     test_loss = 0.0
     correct_test = 0
     total_test = 0
     all_predictions = []
     all_labels = []
+    all_probs = []  # Store probabilities for analysis
     
-    with torch.no_grad():
-        for inputs, labels in tqdm(test_loader, desc='Testing'):
-            inputs, labels = inputs.to(device), labels.to(device)
+    model.eval()
+    for inputs, labels in tqdm(test_loader, desc='Testing (TTA)'):
+        inputs, labels = inputs.to(device), labels.to(device)
+        
+        # Use TTA for predictions
+        probs = predict_tta(model, inputs)
+        predicted = (probs > optimal_threshold).float()  # Use dynamic threshold
+        
+        # Calculate loss on original (non-augmented) prediction
+        with torch.no_grad():
             outputs = model(inputs)
-            
             loss = loss_fn(outputs, labels.unsqueeze(1))
             test_loss += loss.item()
-            
-            probs = torch.sigmoid(outputs)
-            predicted = (probs > 0.5).float()
-            total_test += labels.size(0)
-            correct_test += (predicted == labels.unsqueeze(1)).sum().item()
-            
-            all_predictions.extend(predicted.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
+        
+        total_test += labels.size(0)
+        correct_test += (predicted == labels.unsqueeze(1)).sum().item()
+        
+        all_predictions.extend(predicted.cpu().numpy())
+        all_labels.extend(labels.cpu().numpy())
+        all_probs.extend(probs.cpu().numpy())
 
     final_test_loss = test_loss / len(test_loader)
     final_test_acc = correct_test / total_test
@@ -689,6 +712,7 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
     )
     
     print(f"\n📊 Test Results:")
+    print(f"  Decision Threshold: {optimal_threshold:.4f} (K-Means optimized)")
     print(f"  Test Loss: {final_test_loss:.4f}")
     print(f"  Test Accuracy: {final_test_acc:.4f}")
     print(f"  Precision: {precision:.4f}")
@@ -843,7 +867,7 @@ def main():
     NUM_EPOCHS = 75
     PATIENCE = 15
     LR = 0.001
-    BATCH_SIZE = 16
+    BATCH_SIZE = 32
     WEIGHT_DECAY = 1e-3
     
     QUICK_TEST = True

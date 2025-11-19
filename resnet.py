@@ -46,29 +46,25 @@ class ResBlock3D(nn.Module):
     
 # --- Define the Full 3D ResNet --- #
 class ResNet3D(nn.Module):
-    def __init__(self, dropout_rate=0.3):
+    def __init__(self, dropout_rate=0.3, in_channels=1):
         super(ResNet3D, self).__init__()
 
         # Initial Convolution Layer
         self.initial_conv = nn.Sequential(
-            nn.Conv3d(1, 32, kernel_size=5, padding=2),
+            nn.Conv3d(in_channels, 32, kernel_size=5, padding=2),
             nn.BatchNorm3d(32),
             nn.ReLU(inplace=True),
             nn.MaxPool3d(kernel_size=(2, 2, 1), stride=(2, 2, 1)) 
         )
 
         # Stack of Residual Blocks
-        # 32 Channels (2 blocks instead of 3)
         self.res_block1 = ResBlock3D(in_channels=32, out_channels=32)
         self.res_block2 = ResBlock3D(in_channels=32, out_channels=32)
-        # Pool only spatial dimensions (H,W), preserve temporal (T)
         self.pool1 = nn.MaxPool3d(kernel_size=(2, 2, 1), stride=(2, 2, 1))
         self.dropout1 = nn.Dropout3d(p=dropout_rate) 
-    
-        # 64 Channels 
+
         self.res_block3 = ResBlock3D(in_channels=32, out_channels=64)
         self.res_block4 = ResBlock3D(in_channels=64, out_channels=64)
-        # Pool only spatial dimensions (H,W), preserve temporal (T)
         self.pool2 = nn.MaxPool3d(kernel_size=(2, 2, 1), stride=(2, 2, 1))
         self.dropout2 = nn.Dropout3d(p=dropout_rate) 
 
@@ -77,11 +73,6 @@ class ResNet3D(nn.Module):
 
         # Classifier
         self.classifier = nn.Sequential(
-            nn.Linear(64, 64), 
-            nn.BatchNorm1d(64),
-            nn.ReLU(inplace=True),
-            nn.Dropout(p=dropout_rate),
-
             nn.Linear(64, 32), 
             nn.BatchNorm1d(32),
             nn.ReLU(inplace=True),
@@ -100,17 +91,15 @@ class ResNet3D(nn.Module):
         if x.shape[-1] == 1:  # Check if last dim is channels
             x = x.permute(0, 4, 3, 1, 2)  # (N, H, W, T, C) -> (N, C, T, H, W)
 
-        # Initial Convolution Layer
+        # Initial convolution layer
         x = self.initial_conv(x)
         
-        # 🆕 SIMPLIFIED: Only 4 ResBlock layers (was 8)
-        # Stage 1: 32 channels
+        # Stack of residual blocks
         x = self.res_block1(x)
         x = self.res_block2(x)
         x = self.pool1(x)
         x = self.dropout1(x)
-        
-        # Stage 2: 64 channels
+
         x = self.res_block3(x)
         x = self.res_block4(x)
         x = self.pool2(x)
@@ -129,8 +118,8 @@ class ResNet3D(nn.Module):
 
 
 # --- Function to create a fresh model instance --- #
-def create_model():
-    return ResNet3D()
+def create_model(in_channels=1, dropout_rate=0.3):
+    return ResNet3D(dropout_rate=dropout_rate, in_channels=in_channels)
 
 
 # --- Main block to avoid import errors --- #
