@@ -52,6 +52,42 @@ torch.backends.cudnn.allow_tf32 = True
 from resnet import create_model
 print("📊 Using standard ResNet3D (proven 84-85% configuration)")
 
+# ============================================================================
+# MIXUP DATA AUGMENTATION
+# ============================================================================
+def mixup_data(x, y, alpha=0.4):
+    """Returns mixed inputs, pairs of targets, and lambda
+    
+    Mixup creates virtual training examples by linearly interpolating between
+    random pairs of samples. This smooths the decision boundary and prevents
+    the model from memorizing donor-specific textures.
+    
+    Args:
+        x: Input batch (B, C, T, H, W)
+        y: Labels (B,)
+        alpha: Beta distribution parameter (0.4 is optimal from literature)
+    
+    Returns:
+        mixed_x: Interpolated inputs
+        y_a, y_b: Original label pairs
+        lam: Interpolation coefficient
+    """
+    if alpha > 0:
+        lam = np.random.beta(alpha, alpha)
+    else:
+        lam = 1
+
+    batch_size = x.size(0)
+    index = torch.randperm(batch_size).to(x.device)
+
+    mixed_x = lam * x + (1 - lam) * x[index, :]
+    y_a, y_b = y, y[index]
+    return mixed_x, y_a, y_b, lam
+
+def mixup_criterion(criterion, pred, y_a, y_b, lam):
+    """Compute mixup loss as weighted combination of two labels"""
+    return lam * criterion(pred, y_a.unsqueeze(1)) + (1 - lam) * criterion(pred, y_b.unsqueeze(1))
+
 # Cache directory for preprocessed data
 CACHE_DIR = Path('./cache')
 CACHE_DIR.mkdir(exist_ok=True)
@@ -420,16 +456,21 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
     )
     print("  ✓ Using CosineAnnealingWarmRestarts (periodic exploration)")
 
-    # Standard BCE Loss (no pos_weight - balanced by sampler)
+    # BCE Loss (manual label smoothing applied during training)
     active_count = sum(1 for label in train_labels if label == 1)
     inactive_count = len(train_labels) - active_count
     
-    loss_fn = nn.BCEWithLogitsLoss()  # Default weight=1.0
+    # Standard BCE loss - label smoothing applied by adjusting targets
+    loss_fn = nn.BCEWithLogitsLoss()
     
-    print(f"  ✓ Standard BCE Loss initialized (no pos_weight)")
+    # Label smoothing parameter
+    label_smoothing = 0.1
+    
+    print(f"  ✓ BCE Loss with Label Smoothing ({label_smoothing}) initialized")
     print(f"    • WeightedRandomSampler creates balanced 50/50 batches")
+    print(f"    • Label smoothing: targets [{label_smoothing}, {1-label_smoothing}] instead of [0, 1]")
+    print(f"    • Mixup (alpha=0.4): interpolates between samples for smooth boundaries")
     print(f"    • Dataset: {active_count} active ({active_count/len(train_labels)*100:.1f}%), {inactive_count} inactive ({inactive_count/len(train_labels)*100:.1f}%)")
-    print(f"    • Sampler handles imbalance naturally without loss weighting")
 
     # Tracking variables
     best_val_f1 = 0.0  
@@ -476,10 +517,25 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
             # Zero gradients
             optimizer.zero_grad()
 
-            with autocast('cuda'):
-                # Simple forward pass (no mixup, no label smoothing)
-                outputs = model(inputs)
-                loss = loss_fn(outputs, labels.float().unsqueeze(1))
+            # Apply Mixup augmentation (80% probability)
+            if np.random.rand() > 0.2:
+                inputs, labels_a, labels_b, lam = mixup_data(inputs, labels, alpha=0.4)
+                
+                # Apply label smoothing to mixup targets
+                labels_a_smooth = labels_a.float() * (1 - label_smoothing) + label_smoothing / 2
+                labels_b_smooth = labels_b.float() * (1 - label_smoothing) + label_smoothing / 2
+                
+                with autocast('cuda'):
+                    outputs = model(inputs)
+                    loss = mixup_criterion(loss_fn, outputs, labels_a_smooth, labels_b_smooth, lam)
+            else:
+                # Regular training (20% of batches to maintain some hard examples)
+                # Apply label smoothing: 0 → 0.1, 1 → 0.9
+                labels_smooth = labels.float() * (1 - label_smoothing) + label_smoothing / 2
+                
+                with autocast('cuda'):
+                    outputs = model(inputs)
+                    loss = loss_fn(outputs, labels_smooth.unsqueeze(1))
 
             # Backward pass
             scaler.scale(loss).backward()
