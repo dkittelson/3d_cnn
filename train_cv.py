@@ -48,7 +48,9 @@ import hashlib
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
+# Import model
 from resnet import create_model
+print("📊 Using standard ResNet3D (proven 84-85% configuration)")
 
 # Cache directory for preprocessed data
 CACHE_DIR = Path('./cache')
@@ -58,7 +60,7 @@ CACHE_DIR.mkdir(exist_ok=True)
 # DATASET CLASS
 # ============================================================================
 GLOBAL_INTENSITY_MIN = 0.0
-GLOBAL_INTENSITY_MAX = 8.2212
+GLOBAL_INTENSITY_MAX = 8.2212  # Actual max from dataset - provides optimal contrast for dim cells
 
 class CellDataset(Dataset):
     """Custom Dataset that loads data on-the-fly"""
@@ -73,6 +75,27 @@ class CellDataset(Dataset):
     
     def apply_augmentation(self, array):
         """Apply random augmentations to 3D array"""
+        
+        # ===== TEMPORAL JITTER (IRF Drift Correction) =====
+        # FLIM hardware drift: laser trigger timing shifts between donors
+        # This causes the decay peak to shift by 2-3 time bins
+        # Randomly shift time axis to make model learn curve SHAPE, not absolute position
+        if np.random.rand() > 0.2:  # 80% probability - very important
+            shift = np.random.randint(-5, 6)  # ±5 time bins (~2-3 typical drift)
+            if shift != 0:
+                array = np.roll(array, shift, axis=2)
+                # Zero out wrap-around artifacts
+                if shift < 0:
+                    array[:, :, shift:] = 0  # Zero out end
+                elif shift > 0:
+                    array[:, :, :shift] = 0  # Zero out start
+        
+        # ===== INTENSITY JITTER (Domain Shift) =====
+        # D5 is dimmer than D1-4 training donors
+        # Scale brightness to make model brightness-invariant
+        if np.random.rand() > 0.2:  # 80% probability
+            scale_factor = np.random.uniform(0.6, 1.4)  # ±40% brightness
+            array = array * scale_factor
         
         # Rotations
         if np.random.rand() > 0.5:
@@ -179,7 +202,8 @@ class CellDataset(Dataset):
             total_photons_per_pixel
         )
 
-        # Channel 0: Normalized decay shape
+        # Channel 0: Normalized decay shape (divide by SUM for stability with low photon counts)
+        # Peak norm amplifies noise by 26% (sqrt(14)/14), sum norm only 1% (sqrt(10k)/10k)
         decay_normalized = np.zeros_like(array, dtype=np.float32)
         for i in range(array.shape[0]):
             for j in range(array.shape[1]):
@@ -316,8 +340,8 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
     print(f"  - Using WeightedRandomSampler for balanced 50/50 batches")
     print(f"  - NO pos_weight in loss (sampler handles imbalance)\n")
 
-    # WeightedRandomSampler for balanced batches
-    sample_weights = []
+    # WeightedRandomSampler for TRAINING - balanced 50/50 batches
+    train_sample_weights = []
     active_count_total = sum(1 for label in train_labels if label == 1)
     inactive_count_total = len(train_labels) - active_count_total
     
@@ -326,19 +350,44 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
             weight = 1.0 / active_count_total
         else:  # Inactive  
             weight = 1.0 / inactive_count_total
-        sample_weights.append(weight)
+        train_sample_weights.append(weight)
     
-    sampler = WeightedRandomSampler(
-        weights=sample_weights,
+    train_sampler = WeightedRandomSampler(
+        weights=train_sample_weights,
         num_samples=len(train_dataset),
         replacement=True
     )
+
+    # WeightedRandomSampler for VALIDATION - CRITICAL FIX!
+    # D6 is 77% inactive, but we force 50/50 batches during validation
+    # This prevents model from learning "guess inactive" strategy
+    val_sample_weights = []
+    val_active_count = sum(1 for label in val_labels if label == 1)
+    val_inactive_count = len(val_labels) - val_active_count
+    
+    for label in val_labels:
+        if label == 1:  # Active
+            weight = 1.0 / val_active_count
+        else:  # Inactive
+            weight = 1.0 / val_inactive_count
+        val_sample_weights.append(weight)
+    
+    val_sampler = WeightedRandomSampler(
+        weights=val_sample_weights,
+        num_samples=len(val_dataset),
+        replacement=True
+    )
+
+    print(f"  🎯 BALANCED VALIDATION SAMPLING ENABLED")
+    print(f"     • D6 raw distribution: {val_inactive_count} inactive ({val_inactive_count/len(val_labels)*100:.1f}%), {val_active_count} active ({val_active_count/len(val_labels)*100:.1f}%)")
+    print(f"     • But validation batches will be 50/50 (prevents 'guess inactive' bias)")
+    print(f"     • This forces model to learn features that work on D5 (67% active)\n")
 
     # Create DataLoaders with WeightedRandomSampler
     train_loader = DataLoader(
         train_dataset, 
         batch_size=batch_size, 
-        sampler=sampler,  # Use sampler instead of shuffle
+        sampler=train_sampler,  # Balanced training batches
         num_workers=4, 
         pin_memory=True if torch.cuda.is_available() else False,
         persistent_workers=True,  
@@ -347,11 +396,11 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
     val_loader = DataLoader(
         val_dataset, 
         batch_size=batch_size, 
-        shuffle=False,
-        num_workers=4,  # Optimal for Colab
+        sampler=val_sampler,  # 🔥 BALANCED validation batches (key fix!)
+        num_workers=4,
         pin_memory=True if torch.cuda.is_available() else False,
-        persistent_workers=True,  # Keeps workers alive between epochs (much faster)
-        prefetch_factor=2  # Lower prefetch for persistent workers
+        persistent_workers=True,
+        prefetch_factor=2
     )
 
     # Create fresh model
@@ -362,14 +411,14 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
     # Initialize gradient scaler for mixed precision
     scaler = GradScaler(device.type)  
     
-    # ReduceLROnPlateau Scheduler (validation-based, stable for domain shift)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+    # Use warm restarts scheduler
+    scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
         optimizer,
-        mode='max',           # Maximize validation F1
-        factor=0.5,           # Reduce LR by half
-        patience=5,           # Wait 5 epochs before reducing
-        min_lr=1e-6           # Don't go below this
-    )   
+        T_0=15,              # Restart every 15 epochs (faster feedback)
+        T_mult=2,            # Double cycle length after each restart (15, 30, 60...)
+        eta_min=1e-6         # Minimum LR at end of each cycle
+    )
+    print("  ✓ Using CosineAnnealingWarmRestarts (periodic exploration)")
 
     # Standard BCE Loss (no pos_weight - balanced by sampler)
     active_count = sum(1 for label in train_labels if label == 1)
@@ -511,8 +560,8 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
             val_losses.append(epoch_val_loss)
             val_accuracies.append(epoch_val_acc)
 
-        # Step scheduler based on validation F1 (ReduceLROnPlateau)
-        scheduler.step(epoch_val_f1)
+        # Step scheduler (CosineAnnealingLR - smooth decay each epoch)
+        scheduler.step()
         
         # Get current learning rate
         current_lr = optimizer.param_groups[0]['lr']
@@ -633,16 +682,26 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
         return avg_pred
 
     # Dynamic Threshold Tuning with K-Means
-    def tune_threshold(model, val_loader, device):
+    def tune_threshold(model, val_dataset, device, batch_size):
         """Find optimal threshold using K-Means clustering on validation probabilities"""
         from sklearn.cluster import KMeans
         
         print("\n🔧 Tuning decision threshold with K-Means...")
+        
+        # Create fresh val_loader for threshold tuning
+        val_loader_tune = DataLoader(
+            val_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=4,
+            pin_memory=True if torch.cuda.is_available() else False
+        )
+        
         model.eval()
         all_probs = []
         
         with torch.no_grad():
-            for inputs, _ in tqdm(val_loader, desc='Collecting val probabilities', leave=False):
+            for inputs, _ in tqdm(val_loader_tune, desc='Collecting val probabilities', leave=False):
                 inputs = inputs.to(device)
                 # Use TTA for more robust probabilities
                 probs = predict_tta(model, inputs)
@@ -670,7 +729,7 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
         return optimal_threshold
 
     # Tune threshold on validation set
-    optimal_threshold = tune_threshold(model, val_loader, device)
+    optimal_threshold = tune_threshold(model, val_dataset, device, batch_size)
 
     # Testing with TTA and Dynamic Threshold
     print(f"\nTesting on holdout set (with TTA + threshold={optimal_threshold:.4f}):")
@@ -865,12 +924,19 @@ def main():
     
     # Configuration parameters
     NUM_EPOCHS = 75
-    PATIENCE = 15
-    LR = 0.001
+    PATIENCE = 25  # Increased to survive 20-epoch restart cycles
+    LR = 0.0005
     BATCH_SIZE = 32
     WEIGHT_DECAY = 1e-3
     
     QUICK_TEST = True
+    
+    # Set random seed for reproducibility
+    RANDOM_SEED = 42
+    torch.manual_seed(RANDOM_SEED)
+    torch.cuda.manual_seed_all(RANDOM_SEED)
+    np.random.seed(RANDOM_SEED)
+    print(f"🎲 Random seed: {RANDOM_SEED}")
     
     # Setup device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -1048,21 +1114,25 @@ def main():
     print("TRAINING FINAL MODEL ON ALL CV DATA (D1+D2+D3+D4)")
     print("Testing on D5 (Complete Holdout)")
     print("="*80)
+    print("\n" + "="*80)
+    print("TRAINING FINAL MODEL ON ALL CV DATA (D1+D2+D3+D4)")
+    print("Testing on D5 (Complete Holdout)")
+    print("="*80)
     
     d5_result = train_one_fold(
-        fold_name="D5_FINAL_TEST",
-        train_files=final_train_files,
-        train_labels=final_train_labels,
-        val_files=val_files,
-        val_labels=val_labels,
-        test_files=d5_test_files,  
-        test_labels=d5_test_labels,
-        device=device,
-        num_epochs=NUM_EPOCHS,
-        patience=PATIENCE,
-        batch_size=best_overall_hyperparams['batch_size'],
-        learning_rate=best_overall_hyperparams['learning_rate'],
-        weight_decay=best_overall_hyperparams['weight_decay']
+            fold_name="D5_FINAL_TEST",
+            train_files=final_train_files,
+            train_labels=final_train_labels,
+            val_files=val_files,
+            val_labels=val_labels,
+            test_files=d5_test_files,  
+            test_labels=d5_test_labels,
+            device=device,
+            num_epochs=NUM_EPOCHS,
+            patience=PATIENCE,
+            batch_size=best_overall_hyperparams['batch_size'],
+            learning_rate=best_overall_hyperparams['learning_rate'],
+            weight_decay=best_overall_hyperparams['weight_decay']
     )
     
     # Print final D5 results

@@ -60,12 +60,12 @@ class ResNet3D(nn.Module):
         # Stack of Residual Blocks
         self.res_block1 = ResBlock3D(in_channels=32, out_channels=32)
         self.res_block2 = ResBlock3D(in_channels=32, out_channels=32)
-        self.pool1 = nn.MaxPool3d(kernel_size=(2, 2, 1), stride=(2, 2, 1))
+        self.pool1 = nn.MaxPool3d(kernel_size=(2, 2, 1), stride=(2, 2, 1)) 
         self.dropout1 = nn.Dropout3d(p=dropout_rate) 
 
         self.res_block3 = ResBlock3D(in_channels=32, out_channels=64)
         self.res_block4 = ResBlock3D(in_channels=64, out_channels=64)
-        self.pool2 = nn.MaxPool3d(kernel_size=(2, 2, 1), stride=(2, 2, 1))
+        # No pool2 - preserve 256 time bins and 5x5 spatial resolution
         self.dropout2 = nn.Dropout3d(p=dropout_rate) 
 
         # Global Average Pooling
@@ -88,7 +88,7 @@ class ResNet3D(nn.Module):
         
         # PyTorch expects (N, C, D, H, W)
         # Input from dataset is (N, H, W, T, C)
-        if x.shape[-1] == 1:  # Check if last dim is channels
+        if x.shape[-1] in [1, 2]:  # Check if last dim is channels (1 or 2 channels)
             x = x.permute(0, 4, 3, 1, 2)  # (N, H, W, T, C) -> (N, C, T, H, W)
 
         # Initial convolution layer
@@ -102,7 +102,7 @@ class ResNet3D(nn.Module):
 
         x = self.res_block3(x)
         x = self.res_block4(x)
-        x = self.pool2(x)
+        # No pooling here - preserve temporal and spatial features
         x = self.dropout2(x)
 
         # Global Average Pooling
@@ -118,7 +118,7 @@ class ResNet3D(nn.Module):
 
 
 # --- Function to create a fresh model instance --- #
-def create_model(in_channels=1, dropout_rate=0.3):
+def create_model(in_channels=1, dropout_rate=0.25):  # Balanced dropout
     return ResNet3D(dropout_rate=dropout_rate, in_channels=in_channels)
 
 
@@ -126,7 +126,7 @@ def create_model(in_channels=1, dropout_rate=0.3):
 if __name__ == "__main__":
     # Only instantiate model when running this file directly
     model = ResNet3D().to(device)
-    loss_fn = nn.BCELoss()  # Binary Cross-Entropy Loss 
+    loss_fn = nn.BCELoss()  # Binary Cross-Entropy Loss  
     optimizer = optim.Adam(model.parameters(), lr=0.001)
     
     summary(model, input_size=(1, 32, 32, 32))
