@@ -980,7 +980,7 @@ def main():
     
     # Configuration parameters
     NUM_EPOCHS = 75
-    PATIENCE = 25  # Increased to survive 20-epoch restart cycles
+    PATIENCE = 20  # Increased to survive 20-epoch restart cycles
     LR = 0.0005
     BATCH_SIZE = 32
     WEIGHT_DECAY = 1e-3

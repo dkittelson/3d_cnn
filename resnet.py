@@ -54,13 +54,13 @@ class ResNet3D(nn.Module):
             nn.Conv3d(in_channels, 32, kernel_size=5, padding=2),
             nn.BatchNorm3d(32),
             nn.ReLU(inplace=True),
-            nn.MaxPool3d(kernel_size=(2, 2, 1), stride=(2, 2, 1)) 
+            nn.MaxPool3d(kernel_size=(4, 2, 2), stride=(4, 2, 2))  # Asymmetric: preserve temporal
         )
 
         # Stack of Residual Blocks
         self.res_block1 = ResBlock3D(in_channels=32, out_channels=32)
         self.res_block2 = ResBlock3D(in_channels=32, out_channels=32)
-        self.pool1 = nn.MaxPool3d(kernel_size=(2, 2, 1), stride=(2, 2, 1)) 
+        self.pool1 = nn.MaxPool3d(kernel_size=(4, 2, 2), stride=(4, 2, 2))  # Asymmetric: preserve temporal 
         self.dropout1 = nn.Dropout3d(p=dropout_rate) 
 
         self.res_block3 = ResBlock3D(in_channels=32, out_channels=64)
