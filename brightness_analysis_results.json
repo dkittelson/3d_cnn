@@ -1,0 +1,117 @@
+{
+  "cross_donor_comparison": {
+    "large_donors": {
+      "names": [
+        "D4",
+        "D5"
+      ],
+      "total_photons_mean": 98272.94470179502,
+      "mean_intensity_mean": 3.445311155478794,
+      "count": 3454
+    },
+    "small_donors": {
+      "names": [
+        "D1",
+        "D2",
+        "D3",
+        "D6"
+      ],
+      "total_photons_mean": 77236.68585281927,
+      "mean_intensity_mean": 3.0194583653515124,
+      "count": 12787
+    },
+    "photon_ratio": 1.2723609722077154,
+    "intensity_ratio": 1.1410361523821528,
+    "mann_whitney_p": 9.299352080426434e-17
+  },
+  "brightness_activity_correlation": {
+    "pearson_r": 0.42079730370517954,
+    "interpretation": "MODERATE"
+  },
+  "per_donor_summary": {
+    "D1": {
+      "total_cells": 2899,
+      "active_count": 789,
+      "inactive_count": 2110,
+      "active_ratio": 0.2721628147637116,
+      "total_photons_mean": 55878.825112107625,
+      "total_photons_std": 26113.52775552701,
+      "mean_intensity_mean": 2.467617741848192,
+      "mean_intensity_std": 0.6110166422666793,
+      "snr_mean": 602.848038991935,
+      "active_photons_mean": 47602.619771863116,
+      "inactive_photons_mean": 58973.57677725118,
+      "active_inactive_ratio": 0.8071855629795484
+    },
+    "D2": {
+      "total_cells": 2766,
+      "active_count": 582,
+      "inactive_count": 2184,
+      "active_ratio": 0.210412147505423,
+      "total_photons_mean": 59871.418655097616,
+      "total_photons_std": 30138.932708809945,
+      "mean_intensity_mean": 2.7147767719956373,
+      "mean_intensity_std": 0.8721777737145417,
+      "snr_mean": 587.7493517991799,
+      "active_photons_mean": 57680.099656357386,
+      "inactive_photons_mean": 60455.369047619046,
+      "active_inactive_ratio": 0.9540939136592541
+    },
+    "D3": {
+      "total_cells": 2955,
+      "active_count": 604,
+      "inactive_count": 2351,
+      "active_ratio": 0.20439932318104906,
+      "total_photons_mean": 65297.30964467005,
+      "total_photons_std": 30610.509502256038,
+      "mean_intensity_mean": 3.024897770952401,
+      "mean_intensity_std": 1.0065630131145307,
+      "snr_mean": 536.4778614516761,
+      "active_photons_mean": 63057.07119205298,
+      "inactive_photons_mean": 65872.85367928541,
+      "active_inactive_ratio": 0.9572542810891174
+    },
+    "D4": {
+      "total_cells": 1538,
+      "active_count": 1139,
+      "inactive_count": 399,
+      "active_ratio": 0.7405721716514955,
+      "total_photons_mean": 80339.7366710013,
+      "total_photons_std": 76953.68520541844,
+      "mean_intensity_mean": 3.3437309904919834,
+      "mean_intensity_std": 1.4703224513626267,
+      "snr_mean": 386.0920115424998,
+      "active_photons_mean": 79430.64179104478,
+      "inactive_photons_mean": 82934.87218045113,
+      "active_inactive_ratio": 0.9577472021445721
+    },
+    "D5": {
+      "total_cells": 1916,
+      "active_count": 1291,
+      "inactive_count": 625,
+      "active_ratio": 0.6737995824634656,
+      "total_photons_mean": 112668.18162839249,
+      "total_photons_std": 80723.5917761246,
+      "mean_intensity_mean": 3.5268509747636143,
+      "mean_intensity_std": 1.5561596467592853,
+      "snr_mean": 559.1483068450997,
+      "active_photons_mean": 132663.68086754455,
+      "inactive_photons_mean": 71365.4784,
+      "active_inactive_ratio": 1.8589335325964065
+    },
+    "D6": {
+      "total_cells": 4167,
+      "active_count": 957,
+      "inactive_count": 3210,
+      "active_ratio": 0.22966162706983442,
+      "total_photons_mean": 112089.00743940484,
+      "total_photons_std": 67829.38019106188,
+      "mean_intensity_mean": 3.601762615701368,
+      "mean_intensity_std": 1.3069728623916976,
+      "snr_mean": 480.36278732359284,
+      "active_photons_mean": 157688.01776384536,
+      "inactive_photons_mean": 98494.53613707166,
+      "active_inactive_ratio": 1.6009823889560335
+    }
+  }
+}

@@ -1,0 +1,87 @@
+================================================================================
+FALSE POSITIVE ANALYSIS REPORT
+================================================================================
+
+SUMMARY
+--------------------------------------------------------------------------------
+Total D5 test samples: 1916
+False Positives: 210 (11.0%)
+True Negatives: 415
+True Positives: 1218
+False Negatives: 73
+
+CONFIDENCE STATISTICS
+--------------------------------------------------------------------------------
+FP median confidence: 0.852
+TN median confidence: 0.085
+TP median confidence: 0.933
+FN median confidence: 0.194
+
+KEY FINDINGS
+--------------------------------------------------------------------------------
+Top discriminating features (FP vs TN):
+
+1. Spatial Variance
+   Percent difference: 46.1%
+   Statistical significance: p=2.39e-44
+   FP mean: 122.07
+   TN mean: 226.44
+
+2. Peak Intensity
+   Percent difference: 83.4%
+   Statistical significance: p=9.64e-42
+   FP mean: 2.19
+   TN mean: 13.14
+
+3. Signal To Noise
+   Percent difference: 92.9%
+   Statistical significance: p=1.39e-40
+   FP mean: 131.44
+   TN mean: 1859.60
+
+4. Peak Time
+   Percent difference: 3.8%
+   Statistical significance: p=5.26e-32
+   FP mean: 54.10
+   TN mean: 52.12
+
+5. Total Photons
+   Percent difference: 47.4%
+   Statistical significance: p=1.55e-24
+   FP mean: 44672.83
+   TN mean: 84872.60
+
+
+CLUSTERING RESULTS
+--------------------------------------------------------------------------------
+False positives were grouped into 3 clusters:
+
+Cluster 1: 100 samples
+   Characteristics: [See clustering_analysis.png]
+
+Cluster 2: 62 samples
+   Characteristics: [See clustering_analysis.png]
+
+Cluster 3: 48 samples
+   Characteristics: [See clustering_analysis.png]
+
+
+CONCLUSIONS
+--------------------------------------------------------------------------------
+⚠️  HIGH CONFIDENCE ERRORS: Model is very confident about FPs (median > 0.75)
+   This suggests systematic bias or missing features rather than
+   borderline ambiguity. Possible causes:
+   • D5 inactive cells have different characteristics (domain shift)
+   • Ground truth labeling issues (some 'inactive' cells are weakly active)
+   • Model learned donor-specific artifacts from D1-D4 training data
+
+
+RECOMMENDATIONS
+--------------------------------------------------------------------------------
+1. Manually inspect high-confidence errors (>0.8) to check ground truth
+2. If labeling is correct, consider:
+   • Ensemble methods to reduce bias
+   • Explicit donor encoding as input feature
+   • Training with more diverse donor data
+3. For deployment, adjust threshold based on clinical cost of FP vs FN
+

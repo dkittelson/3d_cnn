@@ -1,0 +1,125 @@
+{
+  "entropy_stats": {
+    "mean": 7.28523449668358,
+    "std": 0.8825165794752595,
+    "total_cells": 16241
+  },
+  "filtering_results": {
+    "1.5sigma": {
+      "threshold_range": [
+        5.96145962747069,
+        8.609009365896469
+      ],
+      "filtered_count": 1621,
+      "filtered_percent": 9.980912505387598,
+      "remaining_count": 14620
+    },
+    "2.0sigma": {
+      "threshold_range": [
+        5.52020133773306,
+        9.050267655634098
+      ],
+      "filtered_count": 810,
+      "filtered_percent": 4.9873776245305095,
+      "remaining_count": 15431
+    },
+    "2.5sigma": {
+      "threshold_range": [
+        5.0789430479954305,
+        9.491525945371729
+      ],
+      "filtered_count": 555,
+      "filtered_percent": 3.417277261252386,
+      "remaining_count": 15686
+    },
+    "3.0sigma": {
+      "threshold_range": [
+        4.637684758257802,
+        9.932784235109358
+      ],
+      "filtered_count": 374,
+      "filtered_percent": 2.3028138661412476,
+      "remaining_count": 15867
+    }
+  },
+  "cell_size_stats": {
+    "large_donors": {
+      "donors": [
+        "D4",
+        "D5"
+      ],
+      "mean": 214.82252460914881,
+      "std": 124.01313298729795,
+      "count": 3454
+    },
+    "small_donors": {
+      "donors": [
+        "D1",
+        "D2",
+        "D3",
+        "D6"
+      ],
+      "mean": 208.0663173535622,
+      "std": 84.42356804373976,
+      "count": 12787
+    },
+    "size_ratio": 1.032471412679958,
+    "mann_whitney_p": 0.006723982769815836
+  },
+  "per_donor_stats": {
+    "D1": {
+      "total_cells": 2899,
+      "active_cells": 789,
+      "inactive_cells": 2110,
+      "entropy_mean": 7.332132321627663,
+      "entropy_std": 0.6954838899396918,
+      "cell_size_mean": 215.8640910658848,
+      "cell_size_std": 86.26474098402164
+    },
+    "D2": {
+      "total_cells": 2766,
+      "active_cells": 582,
+      "inactive_cells": 2184,
+      "entropy_mean": 7.239751708006919,
+      "entropy_std": 0.607016214102624,
+      "cell_size_mean": 199.265003615329,
+      "cell_size_std": 72.45767396484311
+    },
+    "D3": {
+      "total_cells": 2955,
+      "active_cells": 604,
+      "inactive_cells": 2351,
+      "entropy_mean": 7.289463049805022,
+      "entropy_std": 0.6639047300459094,
+      "cell_size_mean": 202.07140439932317,
+      "cell_size_std": 78.64193723627808
+    },
+    "D4": {
+      "total_cells": 1538,
+      "active_cells": 1139,
+      "inactive_cells": 399,
+      "entropy_mean": 6.635795163482403,
+      "entropy_std": 1.5245965527369396,
+      "cell_size_mean": 165.46163849154746,
+      "cell_size_std": 113.90826344730493
+    },
+    "D5": {
+      "total_cells": 1916,
+      "active_cells": 1291,
+      "inactive_cells": 625,
+      "entropy_mean": 7.58181410106907,
+      "entropy_std": 0.9575373471443379,
+      "cell_size_mean": 254.44519832985387,
+      "cell_size_std": 117.40250084876905
+    },
+    "D6": {
+      "total_cells": 4167,
+      "active_cells": 957,
+      "inactive_cells": 3210,
+      "entropy_mean": 7.383133320046598,
+      "entropy_std": 0.8085530209634205,
+      "cell_size_mean": 212.73482121430285,
+      "cell_size_std": 93.17910735192885
+    }
+  }
+}

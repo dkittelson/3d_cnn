@@ -1,0 +1,528 @@
+================================================================================
+PREPROCESSING QUALITY ANALYSIS REPORT
+================================================================================
+
+SUMMARY ACROSS ALL DONORS
+--------------------------------------------------------------------------------
+
+⚠️  QUALITY ISSUES DETECTED:
+
+  • D1 inactive decay: 169.5% clipping
+  • D1 inactive intensity: 150.3% clipping
+  • D1 active decay: 100.1% clipping
+  • D1 active intensity: 99.3% clipping
+  • D1 inactive decay: Low SNR (0.21)
+  • D1 inactive intensity: Low SNR (0.27)
+  • D1 active decay: Low SNR (0.34)
+  • D1 active intensity: Low SNR (0.36)
+  • D1 inactive decay: 97.5% zero pixels
+  • D1 inactive intensity: 94.3% zero pixels
+  • D1 active decay: 84.1% zero pixels
+  • D1 active intensity: 83.3% zero pixels
+  • D2 inactive decay: 186.3% clipping
+  • D2 inactive intensity: 169.5% clipping
+  • D2 active decay: 152.9% clipping
+  • D2 active intensity: 139.3% clipping
+  • D2 inactive decay: Low SNR (0.23)
+  • D2 inactive intensity: Low SNR (0.19)
+  • D2 active decay: Low SNR (0.32)
+  • D2 active intensity: Low SNR (0.30)
+  • D2 inactive decay: 98.3% zero pixels
+  • D2 inactive intensity: 97.4% zero pixels
+  • D2 active decay: 92.8% zero pixels
+  • D2 active intensity: 91.3% zero pixels
+  • D3 inactive decay: 156.1% clipping
+  • D3 inactive intensity: 146.0% clipping
+  • D3 active decay: 118.1% clipping
+  • D3 active intensity: 103.4% clipping
+  • D3 inactive decay: Low SNR (0.21)
+  • D3 inactive intensity: Low SNR (0.24)
+  • D3 active decay: Low SNR (0.33)
+  • D3 active intensity: Low SNR (0.34)
+  • D3 inactive decay: 96.1% zero pixels
+  • D3 inactive intensity: 94.0% zero pixels
+  • D3 active decay: 86.1% zero pixels
+  • D3 active intensity: 83.3% zero pixels
+  • D4 inactive decay: 169.4% clipping
+  • D4 inactive intensity: 147.7% clipping
+  • D4 active decay: 157.8% clipping
+  • D4 active intensity: 152.7% clipping
+  • D4 inactive decay: Low SNR (0.22)
+  • D4 inactive intensity: Low SNR (0.20)
+  • D4 active decay: Low SNR (0.42)
+  • D4 active intensity: Low SNR (0.41)
+  • D4 inactive decay: 97.4% zero pixels
+  • D4 inactive intensity: 95.7% zero pixels
+  • D4 active decay: 89.7% zero pixels
+  • D4 active intensity: 88.7% zero pixels
+  • D5 inactive decay: 177.7% clipping
+  • D5 inactive intensity: 156.0% clipping
+  • D5 active decay: 116.5% clipping
+  • D5 active intensity: 106.0% clipping
+  • D5 inactive decay: Low SNR (0.25)
+  • D5 inactive intensity: Low SNR (0.23)
+  • D5 active decay: Low SNR (0.40)
+  • D5 active intensity: Low SNR (0.39)
+  • D5 inactive decay: 97.7% zero pixels
+  • D5 inactive intensity: 96.0% zero pixels
+  • D5 active decay: 80.5% zero pixels
+  • D5 active intensity: 77.9% zero pixels
+  • D6 inactive decay: 185.5% clipping
+  • D6 inactive intensity: 167.4% clipping
+  • D6 active decay: 101.7% clipping
+  • D6 active intensity: 90.1% clipping
+  • D6 inactive decay: Low SNR (0.27)
+  • D6 inactive intensity: Low SNR (0.27)
+  • D6 active decay: Low SNR (0.42)
+  • D6 active intensity: Low SNR (0.43)
+  • D6 inactive decay: 97.5% zero pixels
+  • D6 inactive intensity: 95.4% zero pixels
+  • D6 active decay: 73.7% zero pixels
+  • D6 active intensity: 70.0% zero pixels
+
+================================================================================
+
+DONOR: D1
+--------------------------------------------------------------------------------
+
+  INACTIVE CELLS:
+
+    DECAY Channel:
+      snr                 : mean=   0.206, std=   0.115, median=   0.142
+      dynamic_range       : mean=  19.638, std=   5.800, median=  19.085
+      entropy             : mean=-1519.942, std= 849.370, median=-2048.000
+      spatial_freq        : mean=   0.049, std=   0.080, median=   0.000
+      edge_strength       : mean=   0.056, std=   0.133, median=   0.000
+      contrast            : mean=   0.280, std=   0.449, median=   0.000
+      mean                : mean=   0.071, std=   0.217, median=   0.000
+      std                 : mean=   0.231, std=   0.545, median=   0.000
+      min                 : mean=   0.000, std=   0.000, median=   0.000
+      max                 : mean=   3.360, std=   6.899, median=   0.000
+      zeros_pct           : mean=   0.975, std=   0.069, median=   1.000
+      max_clipping        : mean=   0.720, std=   0.449, median=   1.000
+      min_clipping        : mean=   0.975, std=   0.069, median=   1.000
+      total_clipping      : mean=   1.695, std=   0.492, median=   2.000
+
+    INTENSITY Channel:
+      snr                 : mean=   0.270, std=   0.107, median=   0.292
+      dynamic_range       : mean=  19.751, std=   5.095, median=  18.062
+      entropy             : mean=-1211.703, std= 948.096, median=-2048.000
+      spatial_freq        : mean=   0.070, std=   0.082, median=   0.000
+      edge_strength       : mean=   0.121, std=   0.185, median=   0.000
+      contrast            : mean=   0.440, std=   0.496, median=   0.000
+      mean                : mean=   0.137, std=   0.255, median=   0.000
+      std                 : mean=   0.409, std=   0.647, median=   0.000
+      min                 : mean=   0.000, std=   0.000, median=   0.000
+      max                 : mean=   5.040, std=   7.203, median=   0.000
+      zeros_pct           : mean=   0.943, std=   0.092, median=   1.000
+      max_clipping        : mean=   0.560, std=   0.496, median=   1.000
+      min_clipping        : mean=   0.943, std=   0.092, median=   1.000
+      total_clipping      : mean=   1.503, std=   0.564, median=   2.000
+
+
+  ACTIVE CELLS:
+
+    DECAY Channel:
+      snr                 : mean=   0.343, std=   0.128, median=   0.352
+      dynamic_range       : mean=  20.421, std=   3.608, median=  20.828
+      entropy             : mean=-416.610, std= 714.741, median=-109.613
+      spatial_freq        : mean=   0.118, std=   0.063, median=   0.128
+      edge_strength       : mean=   0.329, std=   0.262, median=   0.307
+      contrast            : mean=   0.840, std=   0.367, median=   1.000
+      mean                : mean=   0.340, std=   0.338, median=   0.278
+      std                 : mean=   0.849, std=   0.647, median=   0.859
+      min                 : mean=   0.000, std=   0.000, median=   0.000
+      max                 : mean=   9.640, std=   6.336, median=   9.000
+      zeros_pct           : mean=   0.841, std=   0.133, median=   0.847
+      max_clipping        : mean=   0.160, std=   0.366, median=   0.000
+      min_clipping        : mean=   0.841, std=   0.133, median=   0.847
+      total_clipping      : mean=   1.001, std=   0.450, median=   0.847
+
+    INTENSITY Channel:
+      snr                 : mean=   0.360, std=   0.117, median=   0.393
+      dynamic_range       : mean=  20.670, std=   3.386, median=  19.085
+      entropy             : mean=-409.766, std= 716.810, median=-118.434
+      spatial_freq        : mean=   0.115, std=   0.060, median=   0.132
+      edge_strength       : mean=   0.337, std=   0.237, median=   0.366
+      contrast            : mean=   0.840, std=   0.367, median=   1.000
+      mean                : mean=   0.344, std=   0.296, median=   0.284
+      std                 : mean=   0.856, std=   0.578, median=   0.847
+      min                 : mean=   0.000, std=   0.000, median=   0.000
+      max                 : mean=   9.800, std=   6.027, median=   8.000
+      zeros_pct           : mean=   0.833, std=   0.124, median=   0.827
+      max_clipping        : mean=   0.160, std=   0.366, median=   0.000
+      min_clipping        : mean=   0.833, std=   0.124, median=   0.827
+      total_clipping      : mean=   0.993, std=   0.451, median=   0.827
+
+
+
+DONOR: D2
+--------------------------------------------------------------------------------
+
+  INACTIVE CELLS:
+
+    DECAY Channel:
+      snr                 : mean=   0.227, std=   0.095, median=   0.238
+      dynamic_range       : mean=  30.299, std=   6.749, median=  29.827
+      entropy             : mean=-1805.725, std= 656.149, median=-2048.000
+      spatial_freq        : mean=   0.015, std=   0.044, median=   0.000
+      edge_strength       : mean=   0.083, std=   0.306, median=   0.000
+      contrast            : mean=   0.120, std=   0.325, median=   0.000
+      mean                : mean=   0.091, std=   0.344, median=   0.000
+      std                 : mean=   0.398, std=   1.446, median=   0.000
+      min                 : mean=   0.000, std=   0.000, median=   0.000
+      max                 : mean=   5.240, std=  17.903, median=   0.000
+      zeros_pct           : mean=   0.983, std=   0.053, median=   1.000
+      max_clipping        : mean=   0.880, std=   0.325, median=   1.000
+      min_clipping        : mean=   0.983, std=   0.053, median=   1.000
+      total_clipping      : mean=   1.863, std=   0.371, median=   2.000
+
+    INTENSITY Channel:
+      snr                 : mean=   0.185, std=   0.111, median=   0.121
+      dynamic_range       : mean=  24.750, std=   7.125, median=  22.923
+      entropy             : mean=-1497.516, std= 883.540, median=-2048.000
+      spatial_freq        : mean=   0.047, std=   0.081, median=   0.000
+      edge_strength       : mean=   0.102, std=   0.306, median=   0.000
+      contrast            : mean=   0.280, std=   0.449, median=   0.000
+      mean                : mean=   0.111, std=   0.361, median=   0.000
+      std                 : mean=   0.488, std=   1.451, median=   0.000
+      min                 : mean=   0.000, std=   0.000, median=   0.000
+      max                 : mean=   6.880, std=  16.031, median=   0.000
+      zeros_pct           : mean=   0.974, std=   0.062, median=   1.000
+      max_clipping        : mean=   0.720, std=   0.449, median=   1.000
+      min_clipping        : mean=   0.974, std=   0.062, median=   1.000
+      total_clipping      : mean=   1.695, std=   0.492, median=   2.000
+
+
+  ACTIVE CELLS:
+
+    DECAY Channel:
+      snr                 : mean=   0.325, std=   0.134, median=   0.334
+      dynamic_range       : mean=  20.331, std=   3.792, median=  21.584
+      entropy             : mean=-1274.336, std= 949.567, median=-2048.000
+      spatial_freq        : mean=   0.058, std=   0.077, median=   0.000
+      edge_strength       : mean=   0.149, std=   0.238, median=   0.000
+      contrast            : mean=   0.400, std=   0.490, median=   0.000
+      mean                : mean=   0.161, std=   0.290, median=   0.000
+      std                 : mean=   0.412, std=   0.625, median=   0.000
+      min                 : mean=   0.000, std=   0.000, median=   0.000
+      max                 : mean=   4.520, std=   6.133, median=   0.000
+      zeros_pct           : mean=   0.928, std=   0.117, median=   1.000
+      max_clipping        : mean=   0.600, std=   0.490, median=   1.000
+      min_clipping        : mean=   0.928, std=   0.117, median=   1.000
+      total_clipping      : mean=   1.529, std=   0.582, median=   2.000
+
+    INTENSITY Channel:
+      snr                 : mean=   0.303, std=   0.137, median=   0.344
+      dynamic_range       : mean=  21.280, std=   3.819, median=  21.584
+      entropy             : mean=-1035.127, std= 975.326, median=-375.245
+      spatial_freq        : mean=   0.075, std=   0.079, median=   0.052
+      edge_strength       : mean=   0.183, std=   0.257, median=   0.049
+      contrast            : mean=   0.520, std=   0.500, median=   1.000
+      mean                : mean=   0.206, std=   0.325, median=   0.022
+      std                 : mean=   0.547, std=   0.700, median=   0.196
+      min                 : mean=   0.000, std=   0.000, median=   0.000
+      max                 : mean=   6.560, std=   7.156, median=   4.000
+      zeros_pct           : mean=   0.913, std=   0.124, median=   0.984
+      max_clipping        : mean=   0.480, std=   0.499, median=   0.001
+      min_clipping        : mean=   0.913, std=   0.124, median=   0.984
+      total_clipping      : mean=   1.393, std=   0.590, median=   0.985
+
+
+
+DONOR: D3
+--------------------------------------------------------------------------------
+
+  INACTIVE CELLS:
+
+    DECAY Channel:
+      snr                 : mean=   0.210, std=   0.109, median=   0.177
+      dynamic_range       : mean=  25.680, std=   4.308, median=  25.729
+      entropy             : mean=-1249.190, std= 978.607, median=-2048.000
+      spatial_freq        : mean=   0.067, std=   0.085, median=   0.000
+      edge_strength       : mean=   0.103, std=   0.154, median=   0.000
+      contrast            : mean=   0.400, std=   0.490, median=   0.000
+      mean                : mean=   0.127, std=   0.206, median=   0.000
+      std                 : mean=   0.562, std=   0.809, median=   0.000
+      min                 : mean=   0.000, std=   0.000, median=   0.000
+      max                 : mean=   8.720, std=  12.836, median=   0.000
+      zeros_pct           : mean=   0.961, std=   0.067, median=   1.000
+      max_clipping        : mean=   0.600, std=   0.490, median=   1.000
+      min_clipping        : mean=   0.961, std=   0.067, median=   1.000
+      total_clipping      : mean=   1.561, std=   0.540, median=   2.000
+
+    INTENSITY Channel:
+      snr                 : mean=   0.244, std=   0.114, median=   0.202
+      dynamic_range       : mean=  25.540, std=   5.349, median=  24.594
+      entropy             : mean=-1092.153, std= 995.499, median=-2048.000
+      spatial_freq        : mean=   0.075, std=   0.081, median=   0.000
+      edge_strength       : mean=   0.155, std=   0.200, median=   0.000
+      contrast            : mean=   0.480, std=   0.500, median=   0.000
+      mean                : mean=   0.186, std=   0.278, median=   0.000
+      std                 : mean=   0.738, std=   0.931, median=   0.000
+      min                 : mean=   0.000, std=   0.000, median=   0.000
+      max                 : mean=  10.960, std=  15.013, median=   0.000
+      zeros_pct           : mean=   0.940, std=   0.092, median=   1.000
+      max_clipping        : mean=   0.520, std=   0.499, median=   1.000
+      min_clipping        : mean=   0.940, std=   0.092, median=   1.000
+      total_clipping      : mean=   1.460, std=   0.566, median=   2.000
+
+
+  ACTIVE CELLS:
+
+    DECAY Channel:
+      snr                 : mean=   0.332, std=   0.153, median=   0.324
+      dynamic_range       : mean=  22.797, std=   3.910, median=  22.923
+      entropy             : mean=-706.581, std= 922.022, median= -86.512
+      spatial_freq        : mean=   0.094, std=   0.077, median=   0.099
+      edge_strength       : mean=   0.281, std=   0.299, median=   0.160
+      contrast            : mean=   0.680, std=   0.466, median=   1.000
+      mean                : mean=   0.358, std=   0.462, median=   0.100
+      std                 : mean=   0.875, std=   0.863, median=   0.680
+      min                 : mean=   0.000, std=   0.000, median=   0.000
+      max                 : mean=  10.280, std=   8.614, median=  12.000
+      zeros_pct           : mean=   0.861, std=   0.157, median=   0.929
+      max_clipping        : mean=   0.320, std=   0.466, median=   0.000
+      min_clipping        : mean=   0.861, std=   0.157, median=   0.929
+      total_clipping      : mean=   1.181, std=   0.576, median=   0.930
+
+    INTENSITY Channel:
+      snr                 : mean=   0.337, std=   0.149, median=   0.351
+      dynamic_range       : mean=  22.273, std=   3.716, median=  22.923
+      entropy             : mean=-474.065, std= 789.529, median= -69.805
+      spatial_freq        : mean=   0.106, std=   0.069, median=   0.106
+      edge_strength       : mean=   0.348, std=   0.305, median=   0.291
+      contrast            : mean=   0.800, std=   0.400, median=   1.000
+      mean                : mean=   0.413, std=   0.429, median=   0.257
+      std                 : mean=   1.012, std=   0.788, median=   1.037
+      min                 : mean=   0.000, std=   0.000, median=   0.000
+      max                 : mean=  11.280, std=   7.308, median=  13.000
+      zeros_pct           : mean=   0.833, std=   0.156, median=   0.870
+      max_clipping        : mean=   0.200, std=   0.400, median=   0.000
+      min_clipping        : mean=   0.833, std=   0.156, median=   0.870
+      total_clipping      : mean=   1.034, std=   0.501, median=   0.871
+
+
+
+DONOR: D4
+--------------------------------------------------------------------------------
+
+  INACTIVE CELLS:
+
+    DECAY Channel:
+      snr                 : mean=   0.216, std=   0.110, median=   0.198
+      dynamic_range       : mean=  22.763, std=   5.150, median=  20.828
+      entropy             : mean=-1499.149, std= 880.653, median=-2048.000
+      spatial_freq        : mean=   0.046, std=   0.076, median=   0.000
+      edge_strength       : mean=   0.073, std=   0.148, median=   0.000
+      contrast            : mean=   0.280, std=   0.449, median=   0.000
+      mean                : mean=   0.067, std=   0.145, median=   0.000
+      std                 : mean=   0.304, std=   0.642, median=   0.000
+      min                 : mean=   0.000, std=   0.000, median=   0.000
+      max                 : mean=   4.640, std=   9.423, median=   0.000
+      zeros_pct           : mean=   0.974, std=   0.054, median=   1.000
+      max_clipping        : mean=   0.720, std=   0.449, median=   1.000
+      min_clipping        : mean=   0.974, std=   0.054, median=   1.000
+      total_clipping      : mean=   1.694, std=   0.492, median=   2.000
+
+    INTENSITY Channel:
+      snr                 : mean=   0.203, std=   0.123, median=   0.186
+      dynamic_range       : mean=  22.621, std=   7.357, median=  23.222
+      entropy             : mean=-1126.628, std= 965.146, median=-2048.000
+      spatial_freq        : mean=   0.085, std=   0.093, median=   0.000
+      edge_strength       : mean= 179.558, std= 879.068, median=   0.000
+      contrast            : mean=   0.480, std=   0.500, median=   0.000
+      mean                : mean=   0.117, std=   0.190, median=   0.000
+      std                 : mean=   0.530, std=   0.801, median=   0.000
+      min                 : mean=   0.000, std=   0.000, median=   0.000
+      max                 : mean=   9.080, std=  14.311, median=   0.000
+      zeros_pct           : mean=   0.957, std=   0.072, median=   1.000
+      max_clipping        : mean=   0.520, std=   0.499, median=   1.000
+      min_clipping        : mean=   0.957, std=   0.072, median=   1.000
+      total_clipping      : mean=   1.477, std=   0.547, median=   2.000
+
+
+  ACTIVE CELLS:
+
+    DECAY Channel:
+      snr                 : mean=   0.425, std=   0.249, median=   0.350
+      dynamic_range       : mean=  28.311, std=   3.673, median=  28.241
+      entropy             : mean=-1399.875, std= 944.960, median=-2048.000
+      spatial_freq        : mean=   0.036, std=   0.058, median=   0.000
+      edge_strength       : mean=   0.233, std=   0.433, median=   0.000
+      contrast            : mean=   0.320, std=   0.466, median=   0.000
+      mean                : mean=   0.448, std=   0.947, median=   0.000
+      std                 : mean=   0.905, std=   1.475, median=   0.000
+      min                 : mean=   0.000, std=   0.000, median=   0.000
+      max                 : mean=   9.040, std=  14.504, median=   0.000
+      zeros_pct           : mean=   0.897, std=   0.201, median=   1.000
+      max_clipping        : mean=   0.680, std=   0.466, median=   1.000
+      min_clipping        : mean=   0.897, std=   0.201, median=   1.000
+      total_clipping      : mean=   1.578, std=   0.630, median=   2.000
+
+    INTENSITY Channel:
+      snr                 : mean=   0.410, std=   0.243, median=   0.355
+      dynamic_range       : mean=  28.577, std=   3.800, median=  27.959
+      entropy             : mean=-1318.328, std= 973.002, median=-2048.000
+      spatial_freq        : mean=   0.041, std=   0.062, median=   0.000
+      edge_strength       : mean=   0.246, std=   0.433, median=   0.000
+      contrast            : mean=   0.360, std=   0.480, median=   0.000
+      mean                : mean=   0.485, std=   0.960, median=   0.000
+      std                 : mean=   0.996, std=   1.587, median=   0.000
+      min                 : mean=   0.000, std=   0.000, median=   0.000
+      max                 : mean=  10.720, std=  16.936, median=   0.000
+      zeros_pct           : mean=   0.887, std=   0.208, median=   1.000
+      max_clipping        : mean=   0.640, std=   0.480, median=   1.000
+      min_clipping        : mean=   0.887, std=   0.208, median=   1.000
+      total_clipping      : mean=   1.527, std=   0.647, median=   2.000
+
+
+
+DONOR: D5
+--------------------------------------------------------------------------------
+
+  INACTIVE CELLS:
+
+    DECAY Channel:
+      snr                 : mean=   0.250, std=   0.152, median=   0.154
+      dynamic_range       : mean=  17.865, std=   4.171, median=  15.563
+      entropy             : mean=-1673.596, std= 750.155, median=-2048.000
+      spatial_freq        : mean=   0.035, std=   0.073, median=   0.000
+      edge_strength       : mean=   0.051, std=   0.139, median=   0.000
+      contrast            : mean=   0.200, std=   0.400, median=   0.000
+      mean                : mean=   0.046, std=   0.157, median=   0.000
+      std                 : mean=   0.129, std=   0.335, median=   0.000
+      min                 : mean=   0.000, std=   0.000, median=   0.000
+      max                 : mean=   1.760, std=   4.013, median=   0.000
+      zeros_pct           : mean=   0.977, std=   0.071, median=   1.000
+      max_clipping        : mean=   0.800, std=   0.400, median=   1.000
+      min_clipping        : mean=   0.977, std=   0.071, median=   1.000
+      total_clipping      : mean=   1.777, std=   0.449, median=   2.000
+
+    INTENSITY Channel:
+      snr                 : mean=   0.234, std=   0.124, median=   0.187
+      dynamic_range       : mean=  20.566, std=   5.686, median=  20.414
+      entropy             : mean=-1280.168, std= 942.429, median=-2048.000
+      spatial_freq        : mean=   0.068, std=   0.086, median=   0.000
+      edge_strength       : mean=   0.103, std=   0.164, median=   0.000
+      contrast            : mean=   0.400, std=   0.490, median=   0.000
+      mean                : mean=   0.090, std=   0.165, median=   0.000
+      std                 : mean=   0.371, std=   0.660, median=   0.000
+      min                 : mean=   0.000, std=   0.000, median=   0.000
+      max                 : mean=   5.560, std=  10.745, median=   0.000
+      zeros_pct           : mean=   0.960, std=   0.074, median=   1.000
+      max_clipping        : mean=   0.600, std=   0.490, median=   1.000
+      min_clipping        : mean=   0.960, std=   0.074, median=   1.000
+      total_clipping      : mean=   1.560, std=   0.542, median=   2.000
+
+
+  ACTIVE CELLS:
+
+    DECAY Channel:
+      snr                 : mean=   0.396, std=   0.136, median=   0.403
+      dynamic_range       : mean=  27.313, std=   3.397, median=  27.226
+      entropy             : mean=-754.227, std= 970.705, median= -30.138
+      spatial_freq        : mean=   0.067, std=   0.064, median=   0.054
+      edge_strength       : mean=   0.443, std=   0.427, median=   0.381
+      contrast            : mean=   0.640, std=   0.480, median=   1.000
+      mean                : mean=   0.710, std=   0.770, median=   0.460
+      std                 : mean=   1.651, std=   1.508, median=   1.971
+      min                 : mean=   0.000, std=   0.000, median=   0.000
+      max                 : mean=  15.960, std=  14.186, median=  20.000
+      zeros_pct           : mean=   0.805, std=   0.199, median=   0.855
+      max_clipping        : mean=   0.360, std=   0.480, median=   0.000
+      min_clipping        : mean=   0.805, std=   0.199, median=   0.855
+      total_clipping      : mean=   1.165, std=   0.641, median=   0.856
+
+    INTENSITY Channel:
+      snr                 : mean=   0.388, std=   0.138, median=   0.394
+      dynamic_range       : mean=  27.095, std=   4.729, median=  27.952
+      entropy             : mean=-599.204, std= 904.537, median= -20.924
+      spatial_freq        : mean=   0.076, std=   0.063, median=   0.077
+      edge_strength       : mean=   0.518, std=   0.450, median=   0.580
+      contrast            : mean=   0.720, std=   0.449, median=   1.000
+      mean                : mean=   0.824, std=   0.815, median=   0.779
+      std                 : mean=   1.926, std=   1.661, median=   2.158
+      min                 : mean=   0.000, std=   0.000, median=   0.000
+      max                 : mean=  18.600, std=  15.844, median=  20.000
+      zeros_pct           : mean=   0.779, std=   0.201, median=   0.792
+      max_clipping        : mean=   0.280, std=   0.449, median=   0.000
+      min_clipping        : mean=   0.779, std=   0.201, median=   0.792
+      total_clipping      : mean=   1.060, std=   0.605, median=   0.792
+
+
+
+DONOR: D6
+--------------------------------------------------------------------------------
+
+  INACTIVE CELLS:
+
+    DECAY Channel:
+      snr                 : mean=   0.272, std=   0.034, median=   0.277
+      dynamic_range       : mean=  34.079, std=   7.125, median=  32.869
+      entropy             : mean=-1803.819, std= 661.267, median=-2048.000
+      spatial_freq        : mean=   0.013, std=   0.038, median=   0.000
+      edge_strength       : mean=   0.146, std=   0.544, median=   0.000
+      contrast            : mean=   0.120, std=   0.325, median=   0.000
+      mean                : mean=   0.189, std=   0.632, median=   0.000
+      std                 : mean=   0.751, std=   2.661, median=   0.000
+      min                 : mean=   0.000, std=   0.000, median=   0.000
+      max                 : mean=   8.440, std=  29.775, median=   0.000
+      zeros_pct           : mean=   0.975, std=   0.070, median=   1.000
+      max_clipping        : mean=   0.880, std=   0.325, median=   1.000
+      min_clipping        : mean=   0.975, std=   0.070, median=   1.000
+      total_clipping      : mean=   1.855, std=   0.392, median=   2.000
+
+    INTENSITY Channel:
+      snr                 : mean=   0.270, std=   0.096, median=   0.224
+      dynamic_range       : mean=  26.025, std=   9.641, median=  22.923
+      entropy             : mean=-1497.133, std= 884.341, median=-2048.000
+      spatial_freq        : mean=   0.038, std=   0.065, median=   0.000
+      edge_strength       : mean=   0.212, std=   0.634, median=   0.000
+      contrast            : mean=   0.280, std=   0.449, median=   0.000
+      mean                : mean=   0.269, std=   0.739, median=   0.000
+      std                 : mean=   1.008, std=   3.113, median=   0.000
+      min                 : mean=   0.000, std=   0.000, median=   0.000
+      max                 : mean=  11.480, std=  35.406, median=   0.000
+      zeros_pct           : mean=   0.954, std=   0.092, median=   1.000
+      max_clipping        : mean=   0.720, std=   0.449, median=   1.000
+      min_clipping        : mean=   0.954, std=   0.092, median=   1.000
+      total_clipping      : mean=   1.674, std=   0.526, median=   2.000
+
+
+  ACTIVE CELLS:
+
+    DECAY Channel:
+      snr                 : mean=   0.424, std=   0.153, median=   0.459
+      dynamic_range       : mean=  27.650, std=   4.655, median=  29.243
+      entropy             : mean=-595.529, std= 906.644, median= -16.303
+      spatial_freq        : mean=   0.072, std=   0.068, median=   0.059
+      edge_strength       : mean=   0.584, std=   0.525, median=   0.536
+      contrast            : mean=   0.720, std=   0.449, median=   1.000
+      mean                : mean=   1.033, std=   1.006, median=   0.787
+      std                 : mean=   2.114, std=   1.850, median=   2.461
+      min                 : mean=   0.000, std=   0.000, median=   0.000
+      max                 : mean=  19.600, std=  15.692, median=  23.000
+      zeros_pct           : mean=   0.737, std=   0.236, median=   0.778
+      max_clipping        : mean=   0.280, std=   0.449, median=   0.000
+      min_clipping        : mean=   0.737, std=   0.236, median=   0.778
+      total_clipping      : mean=   1.017, std=   0.636, median=   0.779
+
+    INTENSITY Channel:
+      snr                 : mean=   0.431, std=   0.166, median=   0.468
+      dynamic_range       : mean=  27.591, std=   5.186, median=  29.243
+      entropy             : mean=-438.596, std= 806.833, median= -17.258
+      spatial_freq        : mean=   0.079, std=   0.066, median=   0.060
+      edge_strength       : mean=   0.667, std=   0.544, median=   0.639
+      contrast            : mean=   0.800, std=   0.400, median=   1.000
+      mean                : mean=   1.165, std=   1.052, median=   0.939
+      std                 : mean=   2.296, std=   1.834, median=   2.448
+      min                 : mean=   0.000, std=   0.000, median=   0.000
+      max                 : mean=  22.200, std=  16.070, median=  24.000
+      zeros_pct           : mean=   0.700, std=   0.242, median=   0.710
+      max_clipping        : mean=   0.200, std=   0.400, median=   0.000
+      min_clipping        : mean=   0.700, std=   0.242, median=   0.710
+      total_clipping      : mean=   0.901, std=   0.582, median=   0.710
+
+
+
