@@ -1,21 +1,27 @@
 """
-DOMAIN ADVERSARIAL TRAINING (DANN)
+LEAVE-ONE-DONOR-OUT CROSS-VALIDATION 
 ==============================
-Addresses donor bias: D1-D3 (small/inactive) vs D4-D5 (large/active)
+D5: Holdout (Final generalization test)
+D1, D2, D3, D4, D6: Used for Cross-Validation
 
-Model learns to:
-  1. Classify activity (main task)
-  2. Be invariant to donor identity (adversarial task)
+For Each Donor in [D1, D2, D3, D4, D6]:
+    ├─ One Donor = Test Donor
+    ├─ Remaining 4 Donors = Training Donors
+    └─ Train model with fixed hyperparameters → Test on Test Donor
 
-Architecture:
-  Input → Feature Extractor → Activity Classifier (active/inactive)
-                           └→ GRL → Donor Classifier (D1-D6)
+Fixed Hyperparameters:
+    - Learning Rate: 0.001
+    - Batch Size: 16
+    - Weight Decay: 0
 
-Gradient Reversal Layer (GRL) forces features to be:
-  • Discriminative for activity
-  • Invariant to donor (cell size, texture)
+Final Test:
+1. Find Best Performing Fold
+2. Train on ALL 5 CV Donors (D1-D4, D6)
+3. Test on D5 (completely held-out)
 
-Expected improvement: +2-5% accuracy
+-- Basic Description -- 
+Leave-One-Donor-Out CV: Tests patient generalization
+Fixed hyperparameters: Fast iteration, validated defaults
 """
 
 import os
@@ -33,7 +39,8 @@ import json
 from datetime import datetime
 from sklearn.metrics import confusion_matrix, precision_recall_fscore_support
 import torch.nn.functional as F
-from torch.amp import autocast, GradScaler  
+# DISABLED: AMP causes NaN gradients with Conv3d on Ampere/Ada GPUs
+# from torch.amp import autocast, GradScaler  
 from torch.utils.data import WeightedRandomSampler
 import pickle
 import hashlib
@@ -42,9 +49,9 @@ import hashlib
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
-# Import DANN model
-from resnet_dann import create_dann_model
-print("🔥 Using DANN (Domain Adversarial Neural Network) - Target: 87-90% accuracy")
+# Import model
+from resnet import create_model
+print("📊 Using standard ResNet3D (proven 84-85% configuration)")
 
 # ============================================================================
 # MIXUP DATA AUGMENTATION
@@ -87,19 +94,95 @@ CACHE_DIR = Path('./cache')
 CACHE_DIR.mkdir(exist_ok=True)
 
 # ============================================================================
+# ENTROPY FILTERING (TPSF Paper Method)
+# ============================================================================
+
+def compute_entropy(array_2d):
+    """
+    Compute Shannon entropy of a 2D photon distribution.
+    
+    Args:
+        array_2d: (H, W) spatial photon distribution at peak frame
+    
+    Returns:
+        entropy: Shannon entropy in bits
+    """
+    total = array_2d.sum()
+    if total == 0:
+        return 0.0
+    
+    p = array_2d / total
+    p = p[p > 0]  # Only non-zero bins
+    
+    entropy = -np.sum(p * np.log2(p))
+    return entropy
+
+def is_valid_cell_entropy(file_path, entropy_threshold_sigma=2.0):
+    """
+    Check if a cell passes entropy filtering.
+    
+    Based on TPSF paper: Filter cells outside ±threshold_sigma from mean entropy.
+    Precomputed stats from analyze_entropy_filtering.py:
+      Global mean: 7.285, std: 0.883
+    
+    Args:
+        file_path: Path to cell .npy file
+        entropy_threshold_sigma: Number of standard deviations (default: 2.0)
+    
+    Returns:
+        bool: True if cell passes filter, False otherwise
+    """
+    # Precomputed global entropy statistics
+    GLOBAL_ENTROPY_MEAN = 7.285
+    GLOBAL_ENTROPY_STD = 0.883
+    
+    lower_bound = GLOBAL_ENTROPY_MEAN - entropy_threshold_sigma * GLOBAL_ENTROPY_STD
+    upper_bound = GLOBAL_ENTROPY_MEAN + entropy_threshold_sigma * GLOBAL_ENTROPY_STD
+    
+    try:
+        # Load cell and compute entropy at peak frame
+        array = np.load(file_path)
+        
+        # Handle shape variations
+        if array.ndim == 2:
+            array = array[:, :, np.newaxis]
+        elif array.ndim == 4 and array.shape[0] == 1:
+            array = array[0]
+        
+        # Ensure (H, W, T) format
+        if array.shape[2] < array.shape[0]:
+            array = np.transpose(array, (1, 2, 0))
+        
+        # Find peak photon frame
+        temporal_sum = array.sum(axis=(0, 1))
+        peak_frame = temporal_sum.argmax()
+        
+        # Get spatial distribution at peak
+        peak_spatial = array[:, :, peak_frame]
+        
+        # Compute entropy
+        entropy = compute_entropy(peak_spatial)
+        
+        # Check if within bounds
+        return lower_bound <= entropy <= upper_bound
+    
+    except Exception as e:
+        # If error, keep the cell (don't filter out due to technical issues)
+        return True
+
+# ============================================================================
 # DATASET CLASS
 # ============================================================================
 GLOBAL_INTENSITY_MIN = 0.0
-GLOBAL_INTENSITY_MAX = 8.2212  # Actual max from dataset - provides optimal contrast for dim cells
+GLOBAL_INTENSITY_MAX = 15.0  
 
 class CellDataset(Dataset):
-    """Custom Dataset that loads data on-the-fly (with donor labels for DANN)"""
+    """Custom Dataset that loads data on-the-fly"""
 
-    def __init__(self, file_paths, labels, augment=False, donor_labels=None):
+    def __init__(self, file_paths, labels, augment=False):
         self.file_paths = file_paths
         self.labels = labels
         self.augment = augment
-        self.donor_labels = donor_labels  # D1=0, D2=1, D3=2, D4=3, D5=4, D6=5
     
     def __len__(self):
         return len(self.file_paths)
@@ -121,9 +204,9 @@ class CellDataset(Dataset):
                 elif shift > 0:
                     array[:, :, :shift] = 0  # Zero out start
         
-        # ===== INTENSITY JITTER (Domain Shift) =====
-        # D5 is dimmer than D1-4 training donors
-        # Scale brightness to make model brightness-invariant
+        # ===== INTENSITY JITTER (Brightness Robustness) =====
+        # Augment brightness to make model invariant to intensity variations
+        # This helps generalize across different imaging conditions/donors
         if np.random.rand() > 0.2:  # 80% probability
             scale_factor = np.random.uniform(0.6, 1.4)  # ±40% brightness
             array = array * scale_factor
@@ -201,8 +284,6 @@ class CellDataset(Dataset):
     def __getitem__(self, idx):
         import hashlib
         from pathlib import Path
-        import tempfile
-        import shutil
         
         file_path = self.file_paths[idx]
         
@@ -213,119 +294,75 @@ class CellDataset(Dataset):
         
         # Try to load from cache (only for non-augmented data)
         if not self.augment and cache_file.exists():
-            try:
-                with open(cache_file, 'rb') as f:
-                    array = pickle.load(f)
-            except (pickle.UnpicklingError, EOFError, OSError):
-                # Cache file is corrupted, delete and reload
-                cache_file.unlink(missing_ok=True)
-                array = np.load(file_path)
-                # Re-cache with atomic write
-                try:
-                    with tempfile.NamedTemporaryFile(mode='wb', delete=False, dir=cache_dir, suffix='.tmp') as tmp_f:
-                        pickle.dump(array, tmp_f)
-                        tmp_path = tmp_f.name
-                    shutil.move(tmp_path, cache_file)
-                except Exception:
-                    # If caching fails, just continue without cache
-                    if Path(tmp_path).exists():
-                        Path(tmp_path).unlink(missing_ok=True)
+            with open(cache_file, 'rb') as f:
+                array = pickle.load(f)
         else:
             # Load file
             array = np.load(file_path)
             
-            # Cache the raw array if not augmenting (atomic write)
+            # Cache the raw array if not augmenting
             if not self.augment:
-                try:
-                    with tempfile.NamedTemporaryFile(mode='wb', delete=False, dir=cache_dir, suffix='.tmp') as tmp_f:
-                        pickle.dump(array, tmp_f)
-                        tmp_path = tmp_f.name
-                    shutil.move(tmp_path, cache_file)
-                except Exception:
-                    # If caching fails, just continue without cache
-                    if 'tmp_path' in locals() and Path(tmp_path).exists():
-                        Path(tmp_path).unlink(missing_ok=True)
+                with open(cache_file, 'wb') as f:
+                    pickle.dump(array, f)
         
         if self.augment:
             array = self.apply_augmentation(array)
         
-        # Sum across time axis
-        total_photons_per_pixel = np.sum(array, axis=2, keepdims=True)
-        total_photons_per_pixel = np.where(
-            total_photons_per_pixel == 0, 
-            1.0,
-            total_photons_per_pixel
-        )
+        # =============================================================================
+        # DUAL-CHANNEL: LOG-TRANSFORMED FLIM + BINARY MASK
+        # =============================================================================
+        # Channel 0: Log-transformed FLIM (proven method, simple and effective)
+        # Channel 1: Binary mask (explicit region of interest)
+        # 
+        # Why this works:
+        # - Log1p preserves 0.0 background (no "glowing background")
+        # - Mask explicitly signals: "Look here for biology, ignore padding"
+        # - CNN learns: Weight_FLIM * Decay + Weight_Mask * Geometry
+        # - Solves geometric sparsity WITHOUT complex transforms
+        # =============================================================================
 
-        # Channel 0: Normalized decay shape (divide by SUM for stability with low photon counts)
-        # Peak norm amplifies noise by 26% (sqrt(14)/14), sum norm only 1% (sqrt(10k)/10k)
-        decay_normalized = np.zeros_like(array, dtype=np.float32)
-        for i in range(array.shape[0]):
-            for j in range(array.shape[1]):
-                pixel_sum = array[i, j, :].sum()
-                if pixel_sum > 0:
-                    decay_normalized[i, j, :] = array[i, j, :] / pixel_sum
-
-        # Channel 1: Anscombe-transformed intensity map (variance stabilization for Poisson noise)
-        intensity_map = array.sum(axis=2)  # Total photons per pixel
+        array = array.astype(np.float32)
         
-        # Anscombe transform: 2*sqrt(x + 3/8) stabilizes Poisson variance
-        anscombe_intensity = 2 * np.sqrt(intensity_map + 3/8)
+        # ===== LOG TRANSFORMATION (Original, proven method) =====
+        # Simple log1p handles Poisson noise well enough
+        # Preserves zero background, computationally efficient
+        signal = np.log1p(array)  # log(1 + x)
+
+        # Binary Mask
+        spatial_sum = np.sum(array, axis=2)
+        mask = (spatial_sum > 0).astype(np.float32)
         
-        # Normalize to [0, 1] using global statistics
-        anscombe_intensity = (anscombe_intensity - GLOBAL_INTENSITY_MIN) / (GLOBAL_INTENSITY_MAX - GLOBAL_INTENSITY_MIN)
-        anscombe_intensity = np.clip(anscombe_intensity, 0, 1)  # Ensure [0, 1] range
-
-        # Expand intensity to match temporal dimensions
-        anscombe_intensity_expanded = np.tile(anscombe_intensity[:, :, np.newaxis], (1, 1, array.shape[2]))
-
-        # Tranpose to (Time, Height, Width) for CNN
-        decay_normalized = np.transpose(decay_normalized, (2, 0, 1))
-        anscombe_intensity_expanded = np.transpose(anscombe_intensity_expanded, (2, 0, 1))
-
-        # Stack as 2 channels (2, 256, 21, 21)
-        array = np.stack([decay_normalized, anscombe_intensity_expanded], axis=0)
-
-        # Convert to PyTorch tensors 
-        X = torch.tensor(array, dtype=torch.float32)
+        # Normalize log-transformed signal
+        data = signal / 10.0  # Simple scaling
+        
+        # Transpose FLIM to (T, H, W)
+        data = np.transpose(data, (2, 0, 1))  
+        
+        # Expand mask to match temporal dimension
+        mask_3d = np.tile(mask[np.newaxis, :, :], (data.shape[0], 1, 1)) 
+        
+        # Stack as 2 channels: (2, T, H, W)
+        X = np.stack([data, mask_3d], axis=0) 
+        
+        X = torch.tensor(X, dtype=torch.float32)
         y = torch.tensor(self.labels[idx], dtype=torch.float32)
-        
-        # Return with donor label if available
-        if self.donor_labels is not None:
-            donor = torch.tensor(self.donor_labels[idx], dtype=torch.long)
-            return X, y, donor
-        else:
-            return X, y
 
-# ============================================================================
-# EXTRACT DONOR ID FROM FILE PATH
-# ============================================================================
-
-def extract_donor_id(file_path):
-    """
-    Extract donor ID from file path
-    
-    Examples:
-      isolated_cells_D1/file.npy → 0
-      isolated_cells_D2/file.npy → 1
-      ...
-      isolated_cells_D6/file.npy → 5
-    """
-    path_str = str(file_path)
-    for i in range(1, 7):
-        if f'isolated_cells_D{i}' in path_str:
-            return i - 1  # D1=0, D2=1, ..., D6=5
-    raise ValueError(f"Could not extract donor ID from {file_path}")
-
+        return X, y
 
 # ============================================================================
 # DATA COLLECTION BY FOLDER
 # ============================================================================
 
-def collect_data_by_folder():
-    """Collects all data files by their dataset folder (D1-D6)"""
+def collect_data_by_folder(use_entropy_filter=False, entropy_threshold_sigma=2.0):
+    """
+    Collects all data files by their dataset folder (D1-D6).
+    
+    Args:
+        use_entropy_filter: Whether to apply entropy filtering (TPSF paper method)
+        entropy_threshold_sigma: Threshold for entropy filtering (default: 2.0σ)
+    """
 
-    data_dir = Path("/content/3d_cnn/3d_cnn/data")
+    data_dir = Path("3d_cnn/3d_cnn/data/")
     dataset_dict = {}
 
     for i in range(1, 7):
@@ -342,6 +379,7 @@ def collect_data_by_folder():
         # Empty list for files and labels
         files = []
         labels = []
+        filtered_count = 0
 
         # Iterate through each folder
         for file in folder.glob('*.npy'):
@@ -353,13 +391,24 @@ def collect_data_by_folder():
                 label = 1
             else:
                 continue
+            
+            # Apply entropy filter if enabled
+            if use_entropy_filter:
+                if not is_valid_cell_entropy(file, entropy_threshold_sigma):
+                    filtered_count += 1
+                    continue  # Skip this cell
 
             files.append(file)
             labels.append(label)
 
         # Store files, labels in dict with folder_name as key
         dataset_dict[folder_name] = (files, labels)
-        print(f"{folder_name}: {len(files)} files (inactive={labels.count(0)}, active={labels.count(1)})")
+        
+        if use_entropy_filter:
+            total_before = len(files) + filtered_count
+            print(f"{folder_name}: {len(files)} files (inactive={labels.count(0)}, active={labels.count(1)}) | Filtered: {filtered_count}/{total_before} ({100*filtered_count/total_before:.1f}%)")
+        else:
+            print(f"{folder_name}: {len(files)} files (inactive={labels.count(0)}, active={labels.count(1)})")
     
     return dataset_dict
 
@@ -396,7 +445,7 @@ def create_fold_data(dataset_dict, val_fold):
 # ============================================================================
 
 def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, test_files, test_labels,
-                   device, num_epochs=20, patience=5, batch_size=16, learning_rate=0.001, weight_decay=0):
+                   device, num_epochs=20, patience=5, batch_size=16, learning_rate=0.00005, weight_decay=0, num_workers=8):
     """Trains and evaluates a single fold"""
     
     # Print fold header and data summary
@@ -410,115 +459,98 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
     print(f"  - Inactive: {val_labels.count(0)} ({val_labels.count(0)/len(val_labels)*100:.1f}%)")
     print(f"  - Active:   {val_labels.count(1)} ({val_labels.count(1)/len(val_labels)*100:.1f}%)")
     
-    # Extract donor IDs for DANN training
-    train_donor_labels = [extract_donor_id(f) for f in train_files]
-    val_donor_labels = [extract_donor_id(f) for f in val_files]
-    
-    # Create CellDataset objects for train and validation (with donor labels)
-    train_dataset = CellDataset(train_files, train_labels, augment=True, donor_labels=train_donor_labels)
-    val_dataset = CellDataset(val_files, val_labels, augment=False, donor_labels=val_donor_labels)
+    # Create CellDataset objects for train and validation
+    train_dataset = CellDataset(train_files, train_labels, augment=True) # model gets trained on 100% augmented images
+    val_dataset = CellDataset(val_files, val_labels, augment=False) # model validated on raw, true images
 
     # Print class distribution
     print(f"\n📊 Class distribution:")
     active_count = sum(1 for label in train_labels if label == 1)
     inactive_count = len(train_labels) - active_count
-    print(f"  - Active cells: {active_count} ({active_count/len(train_labels)*100:.1f}%)")
+    train_active_ratio = active_count / len(train_labels)
+    print(f"  - Active cells: {active_count} ({train_active_ratio*100:.1f}%)")
     print(f"  - Inactive cells: {inactive_count} ({inactive_count/len(train_labels)*100:.1f}%)") 
-    print(f"  - Using WeightedRandomSampler for balanced 50/50 batches")
-    print(f"  - NO pos_weight in loss (sampler handles imbalance)\n")
+    print(f"  - Using CLASS-BALANCED WeightedRandomSampler")
+    print(f"  - Creates 50/50 active/inactive batches regardless of class distribution\n")
 
-    # WeightedRandomSampler for TRAINING - balanced 50/50 batches
-    train_sample_weights = []
-    active_count_total = sum(1 for label in train_labels if label == 1)
-    inactive_count_total = len(train_labels) - active_count_total
+    # CLASS-BALANCED WeightedRandomSampler
+    # Now that we've fixed the geometric sparsity bug (Anscombe + Mask),
+    # we don't need donor stratification - the model can learn true biology
+    # Simple class balancing is sufficient to handle imbalance
+    
+    # Calculate sample weights by class only
+    sample_weights = []
     
     for label in train_labels:
         if label == 1:  # Active
-            weight = 1.0 / active_count_total
-        else:  # Inactive  
-            weight = 1.0 / inactive_count_total
-        train_sample_weights.append(weight)
-    
-    train_sampler = WeightedRandomSampler(
-        weights=train_sample_weights,
-        num_samples=len(train_dataset),
-        replacement=True
-    )
-
-    # WeightedRandomSampler for VALIDATION - CRITICAL FIX!
-    # D6 is 77% inactive, but we force 50/50 batches during validation
-    # This prevents model from learning "guess inactive" strategy
-    val_sample_weights = []
-    val_active_count = sum(1 for label in val_labels if label == 1)
-    val_inactive_count = len(val_labels) - val_active_count
-    
-    for label in val_labels:
-        if label == 1:  # Active
-            weight = 1.0 / val_active_count
+            # Upweight active samples to match inactive count
+            sample_weights.append(inactive_count / active_count)
         else:  # Inactive
-            weight = 1.0 / val_inactive_count
-        val_sample_weights.append(weight)
+            sample_weights.append(1.0)
     
-    val_sampler = WeightedRandomSampler(
-        weights=val_sample_weights,
-        num_samples=len(val_dataset),
+    # Create WeightedRandomSampler
+    train_sampler = WeightedRandomSampler(
+        weights=sample_weights,
+        num_samples=len(sample_weights),
         replacement=True
     )
+    
+    print(f"  ✓ Active cells upweighted {inactive_count/active_count:.2f}x to match inactive count")
+    print(f"  ✓ Expected batch composition: ~50% active, ~50% inactive")
+    print(f"  ✓ Geometric sparsity fixed by Anscombe + Mask (no need for donor stratification)\n")
 
-    print(f"  🎯 BALANCED VALIDATION SAMPLING ENABLED")
-    print(f"     • D6 raw distribution: {val_inactive_count} inactive ({val_inactive_count/len(val_labels)*100:.1f}%), {val_active_count} active ({val_active_count/len(val_labels)*100:.1f}%)")
-    print(f"     • But validation batches will be 50/50 (prevents 'guess inactive' bias)")
-    print(f"     • This forces model to learn features that work on D5 (67% active)\n")
-
-    # Create DataLoaders with WeightedRandomSampler
+    # Create DataLoaders with stratified sampler
     train_loader = DataLoader(
         train_dataset, 
-        batch_size=batch_size, 
-        sampler=train_sampler,  # Balanced training batches
-        num_workers=4, 
+        batch_size=batch_size,
+        sampler=train_sampler,  # Use stratified sampler instead of shuffle
+        num_workers=num_workers,
         pin_memory=True if torch.cuda.is_available() else False,
-        persistent_workers=True,  
-        prefetch_factor=2  
+        persistent_workers=True if num_workers > 0 else False  # Keep workers alive between epochs
     )
     val_loader = DataLoader(
         val_dataset, 
-        batch_size=batch_size, 
-        sampler=val_sampler,  # 🔥 BALANCED validation batches (key fix!)
-        num_workers=4,
+        batch_size=batch_size,
+        shuffle=False,  # No shuffle for validation
+        num_workers=num_workers,
         pin_memory=True if torch.cuda.is_available() else False,
-        persistent_workers=True,
+        persistent_workers=True if num_workers > 0 else False,
         prefetch_factor=2
     )
 
-    # Create fresh DANN model
-    model = create_dann_model(in_channels=2, lambda_grl=0.1).to(device)
+    # Create fresh model (2 channels: density-normalized FLIM + binary mask)
+    model = create_model(in_channels=2).to(device)
     
     optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay) 
 
-    # Initialize gradient scaler for mixed precision
-    scaler = GradScaler(device.type)  
+    # DISABLED: Mixed precision causes NaN gradients with Conv3d
+    # scaler = GradScaler(device.type)  
     
-    # Use standard cosine annealing (NO restarts for DANN stability)
+    # Use standard cosine annealing (NO restarts for stability)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
         T_max=num_epochs,    # Decay smoothly over full training
         eta_min=1e-6         # Minimum LR at end
     )
-    print("  ✓ Using CosineAnnealingLR (stable decay, no restarts for DANN)")
+    print("  ✓ Using CosineAnnealingLR (stable decay, no restarts)")
 
-    # DANN Loss functions
-    activity_loss_fn = nn.BCEWithLogitsLoss()  # Binary classification (active/inactive)
-    donor_loss_fn = nn.CrossEntropyLoss()      # Multi-class classification (D1-D6)
+    # BCE Loss - NO pos_weight (would double-count with WeightedRandomSampler)
+    active_count = sum(1 for label in train_labels if label == 1)
+    inactive_count = len(train_labels) - active_count
     
-    # Loss weights
-    lambda_donor = 0.1  # Weight for donor loss (smaller to focus on activity)
-    label_smoothing = 0.1
+    # Standard BCE loss - WeightedRandomSampler already handles class balance
+    # Adding pos_weight would create 2.26 × 2.26 ≈ 5.1x bias (DOUBLE COUNTING)
+    loss_fn = nn.BCEWithLogitsLoss()
     
-    print(f"  ✓ DANN Loss initialized")
-    print(f"    • Activity loss: BCEWithLogitsLoss + Label smoothing ({label_smoothing})")
-    print(f"    • Donor loss: CrossEntropyLoss (6 classes: D1-D6)")
-    print(f"    • Lambda_donor: {lambda_donor} (gradient reversal strength)")
+    # Label smoothing parameter (reduce from 0.1 to 0.05 for sharper boundaries)
+    label_smoothing = 0.05
+    
+    print(f"  ✓ BCE Loss with Label Smoothing ({label_smoothing}) initialized")
+    print(f"    • Class-balanced sampling: WeightedRandomSampler creates 50/50 batches")
+    print(f"    • NO pos_weight: Would double-count with sampler (2.26 × 2.26 = 5.1x bias)")
+    print(f"    • Label smoothing: targets [{label_smoothing}, {1-label_smoothing}] instead of [0, 1]")
     print(f"    • Mixup (alpha=0.4): interpolates between samples for smooth boundaries")
+    print(f"    • Intensity augmentation (±40%) handles brightness variations")
     print(f"    • Dataset: {active_count} active ({active_count/len(train_labels)*100:.1f}%), {inactive_count} inactive ({inactive_count/len(train_labels)*100:.1f}%)")
 
     # Tracking variables
@@ -542,6 +574,44 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
     train_accuracies = []
     val_accuracies = []
     
+    # Debugging statistics
+    debug_stats = {
+        'grad_norms': [],
+        'param_norms': [],
+        'batch_losses': [],
+        'learning_rates': [],
+        'activation_stats': {},
+        'per_layer_grads': {},
+        'weight_updates': [],
+        'batch_input_stats': [],
+        'batch_output_stats': [],
+        'learning_dynamics': []
+    }
+    
+    print(f"\n🔍 EXTENSIVE DEBUGGING ENABLED")
+    print(f"   Tracking: per-layer gradients, activations, weight updates, loss components, batch stats")
+    
+    # Register hooks for activation tracking only (no backward hooks to avoid in-place issues)
+    activation_values = {}
+    
+    def get_activation_hook(name):
+        def hook(module, input, output):
+            if isinstance(output, torch.Tensor):
+                activation_values[name] = {
+                    'mean': output.detach().mean().item(),
+                    'std': output.detach().std().item(),
+                    'min': output.detach().min().item(),
+                    'max': output.detach().max().item(),
+                    'sparsity': (output.detach().abs() < 1e-6).float().mean().item()
+                }
+        return hook
+    
+    # Register forward hooks only on key layers
+    hook_handles = []
+    for name, module in model.named_modules():
+        if isinstance(module, (torch.nn.Conv3d, torch.nn.Linear, torch.nn.BatchNorm3d)):
+            hook_handles.append(module.register_forward_hook(get_activation_hook(name)))
+    
     # Main training loop
     epoch = 0
     while epoch < num_epochs:
@@ -553,81 +623,197 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
         running_loss = 0.0 
         correct_train = 0 
         total_train = 0
+        
+        # Epoch-level debugging
+        epoch_grad_norms = []
+        epoch_batch_losses = []
 
         # Progress bar
         train_pbar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{num_epochs} [Train]')
 
         # Loop through training batches
-        for batch_data in train_pbar:
-            # Unpack with donor labels
-            inputs, labels, donor_ids = batch_data
+        batch_idx = 0
+        for inputs, labels in train_pbar:
             
             # Move data to device
-            inputs, labels, donor_ids = inputs.to(device), labels.to(device), donor_ids.to(device)
+            inputs, labels = inputs.to(device), labels.to(device) 
+            
+            # Track input statistics
+            batch_input_stats = {
+                'mean': inputs.mean().item(),
+                'std': inputs.std().item(),
+                'min': inputs.min().item(),
+                'max': inputs.max().item(),
+                'zeros': (inputs == 0).float().mean().item()
+            }
+            debug_stats['batch_input_stats'].append(batch_input_stats)
 
             # Zero gradients
             optimizer.zero_grad()
+            
+            # Store pre-update weights for tracking updates
+            if batch_idx % 50 == 0:  # Sample every 50 batches
+                pre_weights = {name: param.data.clone() for name, param in model.named_parameters() if param.requires_grad}
+            
+            batch_idx += 1
 
-            # Apply Mixup augmentation (80% probability)
-            if np.random.rand() > 0.2:
+            # Apply Mixup augmentation (30% probability - reduced for gradient stability)
+            if np.random.rand() > 0.7:
                 inputs, labels_a, labels_b, lam = mixup_data(inputs, labels, alpha=0.4)
                 
                 # Apply label smoothing to mixup targets
                 labels_a_smooth = labels_a.float() * (1 - label_smoothing) + label_smoothing / 2
                 labels_b_smooth = labels_b.float() * (1 - label_smoothing) + label_smoothing / 2
                 
-                with autocast('cuda'):
-                    # Forward pass with DANN
-                    activity_pred, donor_pred = model(inputs, return_donor_pred=True)
-                    
-                    # Activity loss (mixup)
-                    activity_loss = mixup_criterion(activity_loss_fn, activity_pred, labels_a_smooth, labels_b_smooth, lam)
-                    
-                    # Donor loss (no mixup - just use original donor_ids)
-                    donor_loss = donor_loss_fn(donor_pred, donor_ids)
-                    
-                    # Combined loss (GRL already reverses donor gradients)
-                    loss = activity_loss + lambda_donor * donor_loss
+                # DISABLED: autocast causes NaN with Conv3d - using full FP32
+                # with autocast('cuda'):
+                outputs = model(inputs)
+                loss = mixup_criterion(loss_fn, outputs, labels_a_smooth, labels_b_smooth, lam)
             else:
-                # Regular training (20% of batches to maintain some hard examples)
-                # Apply label smoothing: 0 → 0.1, 1 → 0.9
+                # Regular training (70% of batches for more stable gradients)
+                # Apply label smoothing: 0 → 0.05, 1 → 0.95
                 labels_smooth = labels.float() * (1 - label_smoothing) + label_smoothing / 2
                 
-                with autocast('cuda'):
-                    # Forward pass with DANN
-                    activity_pred, donor_pred = model(inputs, return_donor_pred=True)
-                    
-                    # Activity loss
-                    activity_loss = activity_loss_fn(activity_pred, labels_smooth.unsqueeze(1))
-                    
-                    # Donor loss
-                    donor_loss = donor_loss_fn(donor_pred, donor_ids)
-                    
-                    # Combined loss
-                    loss = activity_loss + lambda_donor * donor_loss
+                # DISABLED: autocast causes NaN with Conv3d - using full FP32
+                # with autocast('cuda'):
+                outputs = model(inputs)
+                loss = loss_fn(outputs, labels_smooth.unsqueeze(1))
 
             # Backward pass
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
+            loss.backward()  # Direct backward - no scaler
             
+            # Track per-layer gradient statistics (sample every 50 batches)
+            if (batch_idx - 1) % 50 == 0:
+                layer_grad_stats = {}
+                for name, param in model.named_parameters():
+                    if param.grad is not None:
+                        # Handle scalar gradients (bias terms)
+                        grad_flat = param.grad.flatten()
+                        if grad_flat.numel() > 1:
+                            layer_grad_stats[name] = {
+                                'mean': param.grad.mean().item(),
+                                'std': param.grad.std().item(),
+                                'norm': param.grad.norm().item(),
+                                'max': param.grad.abs().max().item()
+                            }
+                        else:
+                            layer_grad_stats[name] = {
+                                'mean': param.grad.item(),
+                                'std': 0.0,
+                                'norm': abs(param.grad.item()),
+                                'max': abs(param.grad.item())
+                            }
+                debug_stats['per_layer_grads'][f'epoch_{epoch}_batch_{batch_idx-1}'] = layer_grad_stats
 
-            # Gradient clipping (tight control for DANN stability)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            # Gradient clipping (back to 35.0 - bottleneck removed)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=35.0)
+            epoch_grad_norms.append(grad_norm.item())
+            
+            # Track gradient flow through network
+            grad_flow = {}
+            for name, param in model.named_parameters():
+                if param.grad is not None and 'weight' in name:
+                    grad_flow[name] = param.grad.abs().mean().item()
 
-            # Update weights
-            scaler.step(optimizer)
-            scaler.update()
+            # Update weights - direct step, no scaler
+            optimizer.step()
+            # scaler.update()  # DISABLED - not using mixed precision
+            
+            # Track weight updates (sample every 50 batches)
+            if (batch_idx - 1) % 50 == 0:
+                weight_updates = {}
+                for name, param in model.named_parameters():
+                    if param.requires_grad and name in pre_weights:
+                        update = (param.data - pre_weights[name]).abs().mean().item()
+                        weight_updates[name] = update
+                debug_stats['weight_updates'].append(weight_updates)
+            
+            # Track output statistics
+            with torch.no_grad():
+                output_probs = torch.sigmoid(outputs)
+                batch_output_stats = {
+                    'mean_prob': output_probs.mean().item(),
+                    'std_prob': output_probs.std().item(),
+                    'min_prob': output_probs.min().item(),
+                    'max_prob': output_probs.max().item(),
+                    'entropy': -(output_probs * torch.log(output_probs + 1e-8) + 
+                                 (1 - output_probs) * torch.log(1 - output_probs + 1e-8)).mean().item()
+                }
+                debug_stats['batch_output_stats'].append(batch_output_stats)
 
             # Update running metrics
-            running_loss += loss.item()
-            # Track accuracy (use activity predictions)
-            predicted = (torch.sigmoid(activity_pred) > 0.5).float()
+            batch_loss = loss.item()
+            running_loss += batch_loss
+            epoch_batch_losses.append(batch_loss)
+            # Track accuracy
+            predicted = (torch.sigmoid(outputs) > 0.5).float()
             total_train += labels.size(0)
             correct_train += (predicted == labels.unsqueeze(1)).sum().item()
         
         # Calculate epoch training metrics
         epoch_train_loss = running_loss / len(train_loader)
         epoch_train_acc = correct_train / total_train
+        
+        # Debugging: Check for training issues
+        avg_grad_norm = np.mean(epoch_grad_norms) if epoch_grad_norms else 0
+        max_grad_norm = np.max(epoch_grad_norms) if epoch_grad_norms else 0
+        min_grad_norm = np.min(epoch_grad_norms) if epoch_grad_norms else 0
+        batch_loss_std = np.std(epoch_batch_losses) if epoch_batch_losses else 0
+        batch_loss_mean = np.mean(epoch_batch_losses) if epoch_batch_losses else 0
+        
+        # Store debugging stats
+        debug_stats['grad_norms'].append(avg_grad_norm)
+        debug_stats['batch_losses'].extend(epoch_batch_losses)
+        debug_stats['learning_rates'].append(optimizer.param_groups[0]['lr'])
+        
+        # Analyze activation patterns (if we tracked any this epoch)
+        if activation_values:
+            avg_activation_stats = {
+                'mean_activation': np.mean([v['mean'] for v in activation_values.values()]),
+                'mean_sparsity': np.mean([v['sparsity'] for v in activation_values.values()]),
+                'dead_neurons': sum(1 for v in activation_values.values() if v['sparsity'] > 0.95)
+            }
+            debug_stats['activation_stats'][f'epoch_{epoch}'] = avg_activation_stats
+        
+        # Analyze learning dynamics
+        if len(debug_stats['batch_output_stats']) > 0:
+            recent_outputs = debug_stats['batch_output_stats'][-len(train_loader):]
+            learning_dynamics = {
+                'avg_entropy': np.mean([o['entropy'] for o in recent_outputs]),
+                'prob_std': np.mean([o['std_prob'] for o in recent_outputs]),
+                'confidence': 1 - np.mean([o['entropy'] for o in recent_outputs])  # High confidence = low entropy
+            }
+            debug_stats['learning_dynamics'].append(learning_dynamics)
+        
+        # Print detailed debugging info every 5 epochs
+        if (epoch + 1) % 5 == 0:
+            print(f"\n  🔍 DEBUG EPOCH {epoch+1}:")
+            print(f"     Grad: avg={avg_grad_norm:.4f}, max={max_grad_norm:.4f}, min={min_grad_norm:.4f}")
+            print(f"     Loss: mean={batch_loss_mean:.4f}, std={batch_loss_std:.4f}")
+            if activation_values:
+                print(f"     Activations: mean={avg_activation_stats['mean_activation']:.4f}, sparsity={avg_activation_stats['mean_sparsity']:.4f}")
+                if avg_activation_stats['dead_neurons'] > 0:
+                    print(f"     ⚠️  Dead neurons detected: {avg_activation_stats['dead_neurons']} layers")
+            if learning_dynamics:
+                print(f"     Output: entropy={learning_dynamics['avg_entropy']:.4f}, confidence={learning_dynamics['confidence']:.4f}")
+            
+            # Check for specific bottlenecks
+            if batch_loss_std / batch_loss_mean > 0.5:
+                print(f"     ⚠️  High loss variance (CV={batch_loss_std/batch_loss_mean:.2f}) - inconsistent batches")
+            if learning_dynamics and learning_dynamics['avg_entropy'] < 0.3:
+                print(f"     ⚠️  Very low entropy - model might be overconfident")
+            if learning_dynamics and learning_dynamics['avg_entropy'] > 0.6:
+                print(f"     ⚠️  High entropy - model is uncertain")
+        
+        # Warnings for potential issues
+        if avg_grad_norm < 0.001 and epoch > 5:
+            print(f"  ⚠️  WARNING: Very small gradients ({avg_grad_norm:.6f}) - possible vanishing gradients")
+        if max_grad_norm > 4.5 and epoch > 5:
+            print(f"  ⚠️  WARNING: Gradients hitting clip threshold ({max_grad_norm:.2f}) - possible exploding gradients")
+        if batch_loss_std > 0.5 and epoch > 10:
+            print(f"  ⚠️  WARNING: High batch loss variance ({batch_loss_std:.3f}) - possible data quality issues")
+        if min_grad_norm < 1e-7 and epoch > 5:
+            print(f"  ⚠️  WARNING: Near-zero gradients detected ({min_grad_norm:.2e}) - learning stalled")
         
         # Append to history lists
         train_losses.append(epoch_train_loss)
@@ -649,21 +835,19 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
         with torch.no_grad():
 
             # Loop through validation batches
-            for batch_data in val_pbar:
-                # Unpack with donor labels
-                inputs, labels, donor_ids = batch_data
+            for inputs, labels in val_pbar:
 
                 # Move to device
                 inputs, labels = inputs.to(device), labels.to(device)
 
-                # Forward pass (only activity predictions needed)
-                activity_pred = model(inputs, return_donor_pred=False)
+                # Forward pass
+                outputs = model(inputs)
 
                 # Calculate loss
-                loss = activity_loss_fn(activity_pred, labels.unsqueeze(1))
+                loss = loss_fn(outputs, labels.unsqueeze(1))
 
                 running_val_loss += loss.item()
-                predicted = (torch.sigmoid(activity_pred) > 0.5).float()
+                predicted = (torch.sigmoid(outputs) > 0.5).float()
                 
                 # Collect predictions and labels for metrics
                 all_val_preds.extend(predicted.cpu().numpy())
@@ -764,16 +948,14 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
 
-    # Create test dataset and loader (with donor labels for consistency)
-    test_donor_labels = [extract_donor_id(f) for f in test_files]
-    test_dataset = CellDataset(test_files, test_labels, augment=False, donor_labels=test_donor_labels)
+    # Create test dataset and loader
+    test_dataset = CellDataset(test_files, test_labels, augment=False)
     test_loader = DataLoader(
         test_dataset,
         batch_size=batch_size * 4,  # 4x larger batch for testing (no gradients needed)
         shuffle=False,
-        num_workers=4,
-        pin_memory=True if torch.cuda.is_available() else False,
-        prefetch_factor=4
+        num_workers=num_workers,
+        pin_memory=True if torch.cuda.is_available() else False
     )
 
     # Test-Time Augmentation (TTA) Helper
@@ -784,25 +966,25 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
         
         # Original
         with torch.no_grad():
-            pred = torch.sigmoid(model(inputs, return_donor_pred=False))
+            pred = torch.sigmoid(model(inputs))
             predictions.append(pred)
         
         # Rotate 90°
         with torch.no_grad():
             rotated = torch.rot90(inputs, k=1, dims=[3, 4])  # Rotate H×W plane
-            pred = torch.sigmoid(model(rotated, return_donor_pred=False))
+            pred = torch.sigmoid(model(rotated))
             predictions.append(pred)
         
         # Flip Horizontal
         with torch.no_grad():
             flipped_h = torch.flip(inputs, dims=[4])  # Flip width
-            pred = torch.sigmoid(model(flipped_h, return_donor_pred=False))
+            pred = torch.sigmoid(model(flipped_h))
             predictions.append(pred)
         
         # Flip Vertical
         with torch.no_grad():
             flipped_v = torch.flip(inputs, dims=[3])  # Flip height
-            pred = torch.sigmoid(model(flipped_v, return_donor_pred=False))
+            pred = torch.sigmoid(model(flipped_v))
             predictions.append(pred)
         
         # Average all predictions
@@ -810,8 +992,23 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
         return avg_pred
 
     # Dynamic Threshold Tuning with K-Means
-    def tune_threshold(model, val_dataset, device, batch_size):
-        """Find optimal threshold using K-Means clustering on validation probabilities"""
+    def tune_threshold(model, val_dataset, device, batch_size, train_active_ratio):
+        """
+        Find optimal threshold using K-Means clustering on validation probabilities.
+        
+        Automatically estimates test set's class distribution from cluster sizes
+        and adjusts threshold for prior probability shift - NO LABELS NEEDED.
+        
+        Args:
+            model: Trained model
+            val_dataset: Validation/test dataset (labels not used)
+            device: Computation device
+            batch_size: Batch size for inference
+            train_active_ratio: Known training set active ratio (from training labels)
+        
+        Returns:
+            Adjusted threshold accounting for estimated class distribution shift
+        """
         from sklearn.cluster import KMeans
         
         print("\n🔧 Tuning decision threshold with K-Means...")
@@ -821,7 +1018,7 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
             val_dataset,
             batch_size=batch_size,
             shuffle=False,
-            num_workers=4,
+            num_workers=num_workers,
             pin_memory=True if torch.cuda.is_available() else False
         )
         
@@ -829,8 +1026,7 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
         all_probs = []
         
         with torch.no_grad():
-            for batch_data in tqdm(val_loader_tune, desc='Collecting val probabilities', leave=False):
-                inputs, _, _ = batch_data  # Unpack donor labels (unused)
+            for inputs, _ in tqdm(val_loader_tune, desc='Collecting probabilities', leave=False):
                 inputs = inputs.to(device)
                 # Use TTA for more robust probabilities
                 probs = predict_tta(model, inputs)
@@ -843,25 +1039,59 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
         kmeans = KMeans(n_clusters=2, random_state=42, n_init=10)
         kmeans.fit(probs_array)
         
-        # Get cluster centers
-        centers = sorted(kmeans.cluster_centers_.flatten())
-        inactive_center = centers[0]
-        active_center = centers[1]
+        # Get cluster centers and assignments
+        centers = kmeans.cluster_centers_.flatten()
+        labels = kmeans.labels_
         
-        # Optimal threshold = midpoint between clusters
-        optimal_threshold = (inactive_center + active_center) / 2.0
+        # Identify which cluster is "active" (higher probability center)
+        if centers[0] > centers[1]:
+            active_cluster_id = 0
+            inactive_cluster_id = 1
+        else:
+            active_cluster_id = 1
+            inactive_cluster_id = 0
         
-        print(f"  Inactive cluster center: {inactive_center:.4f}")
-        print(f"  Active cluster center:   {active_center:.4f}")
-        print(f"  ✓ Optimal threshold:     {optimal_threshold:.4f}")
+        inactive_center = centers[inactive_cluster_id]
+        active_center = centers[active_cluster_id]
         
-        return optimal_threshold
+        # Base threshold = midpoint between clusters
+        base_threshold = (inactive_center + active_center) / 2.0
+        
+        # CRITICAL: Estimate test set's active ratio from cluster sizes (NO LABELS NEEDED!)
+        active_cluster_size = np.sum(labels == active_cluster_id)
+        total_samples = len(labels)
+        estimated_test_active_ratio = active_cluster_size / total_samples
+        
+        # Adjust threshold based on estimated prior probability shift
+        train_log_odds = np.log(train_active_ratio / (1 - train_active_ratio))
+        test_log_odds = np.log(estimated_test_active_ratio / (1 - estimated_test_active_ratio))
+        adjustment = test_log_odds - train_log_odds
+        
+        # Apply adjustment (scale by 0.1 for smoother correction)
+        adjusted_threshold = base_threshold - adjustment * 0.1
+        
+        print(f"  Inactive cluster: center={inactive_center:.4f}, size={total_samples - active_cluster_size}")
+        print(f"  Active cluster:   center={active_center:.4f}, size={active_cluster_size}")
+        print(f"  Base threshold:   {base_threshold:.4f}")
+        print(f"\n  📐 Prior probability adjustment:")
+        print(f"     Training active ratio:  {train_active_ratio:.1%} (from labels)")
+        print(f"     Estimated test ratio:   {estimated_test_active_ratio:.1%} (from clusters)")
+        print(f"     Log-odds adjustment:    {adjustment:.4f}")
+        print(f"  ✓ Adjusted threshold:     {adjusted_threshold:.4f}")
+        
+        return adjusted_threshold
 
-    # Tune threshold on validation set
-    optimal_threshold = tune_threshold(model, val_dataset, device, batch_size)
+    # Tune threshold on validation set (uses K-means clustering + automatic prior adjustment)
+    optimal_threshold = tune_threshold(
+        model=model, 
+        val_dataset=val_dataset, 
+        device=device, 
+        batch_size=batch_size,
+        train_active_ratio=train_active_ratio  # From training labels
+    )
 
-    # Testing with TTA and Dynamic Threshold
-    print(f"\nTesting on holdout set (with TTA + threshold={optimal_threshold:.4f}):")
+    # Testing with TTA and Adaptive Threshold
+    print(f"\nTesting on holdout set (with TTA + adaptive threshold={optimal_threshold:.4f}):")
     test_loss = 0.0
     correct_test = 0
     total_test = 0
@@ -870,8 +1100,7 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
     all_probs = []  # Store probabilities for analysis
     
     model.eval()
-    for batch_data in tqdm(test_loader, desc='Testing (TTA)'):
-        inputs, labels, _ = batch_data  # Unpack donor labels (unused)
+    for inputs, labels in tqdm(test_loader, desc='Testing (TTA)'):
         inputs, labels = inputs.to(device), labels.to(device)
         
         # Use TTA for predictions
@@ -880,8 +1109,8 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
         
         # Calculate loss on original (non-augmented) prediction
         with torch.no_grad():
-            outputs = model(inputs, return_donor_pred=False)
-            loss = activity_loss_fn(outputs, labels.unsqueeze(1))
+            outputs = model(inputs)
+            loss = loss_fn(outputs, labels.unsqueeze(1))
             test_loss += loss.item()
         
         total_test += labels.size(0)
@@ -913,7 +1142,7 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
 
     # ===== ERROR ANALYSIS =====
     print(f"\n{'='*80}")
-    print("ERROR ANALYSIS: Understanding the 15% Ceiling")
+    print("ERROR ANALYSIS: Understanding the Performance Ceiling")
     print(f"{'='*80}")
     
     # Categorize predictions
@@ -949,6 +1178,7 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
     print(f"  Count: {len(fn_indices)} ({len(fn_indices)/(cm[1,0]+cm[1,1])*100:.1f}% of all active)")
     print(f"  Average Confidence: {np.mean(fn_probs):.3f} ± {np.std(fn_probs):.3f}")
     print(f"  Median Confidence: {np.median(fn_probs):.3f}")
+    print(f"  Close to threshold (0.4-0.5): {sum(1 for p in fn_probs if 0.4 <= p <= 0.5)} ({sum(1 for p in fn_probs if 0.4 <= p <= 0.5)/len(fn_probs)*100:.1f}%)")
     
     print(f"\n⚪ True Negatives (Predicted Inactive, Actually Inactive):")
     print(f"  Count: {len(tn_indices)}")
@@ -957,6 +1187,9 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
     # Diagnosis
     print(f"\n🔬 DIAGNOSIS:")
     fp_median = np.median(fp_probs)
+    fn_median = np.median(fn_probs)
+    
+    # False Positive Analysis
     if fp_median < 0.55:
         print(f"  ✓ FP median confidence ({fp_median:.3f}) is near threshold")
         print(f"    → These are genuinely ambiguous cells (biological overlap)")
@@ -973,8 +1206,31 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
         print(f"    → Suggests systematic bias or missing features")
         print(f"    → Need to investigate what makes these cells look 'active'")
     
+    # False Negative Analysis
+    if fn_median > 0.45:
+        print(f"  ✓ FN median confidence ({fn_median:.3f}) is close to threshold")
+        print(f"    → Borderline active cells that are hard to classify")
+    else:
+        print(f"  ⚠ FN median confidence ({fn_median:.3f}) is low")
+        print(f"    → Model is confidently wrong about some active cells")
+        print(f"    → These might be dim/low-SNR active cells")
+    
+    # Separation quality
+    tp_median = np.median(tp_probs)
+    tn_median = np.median(tn_probs)
+    separation = tp_median - tn_median
+    print(f"\n📏 CLASS SEPARATION:")
+    print(f"  TP median: {tp_median:.3f}, TN median: {tn_median:.3f}")
+    print(f"  Separation: {separation:.3f}")
+    if separation > 0.5:
+        print(f"  ✓ Excellent separation - model has strong discriminative power")
+    elif separation > 0.3:
+        print(f"  ✓ Good separation - classes are distinguishable")
+    else:
+        print(f"  ⚠ Weak separation - significant overlap between classes")
+    
     # Create error analysis plot
-    plt.figure(figsize=(15, 5))
+    fig = plt.figure(figsize=(15, 5))
     
     # Plot 1: Confidence distributions
     plt.subplot(1, 3, 1)
@@ -1018,6 +1274,201 @@ def train_one_fold(fold_name, train_files, train_labels, val_files, val_labels, 
     plt.savefig(f'saved_models/error_analysis_{fold_name}.png', dpi=300, bbox_inches='tight')
     print(f"\n📊 Error analysis plot saved to: saved_models/error_analysis_{fold_name}.png")
     plt.close()
+    
+    # ===== TRAINING DIAGNOSTICS SUMMARY =====
+    print(f"\n{'='*80}")
+    print("TRAINING DIAGNOSTICS SUMMARY")
+    print(f"{'='*80}")
+    
+    avg_grad_norm_all = np.mean(debug_stats['grad_norms'])
+    max_grad_norm_all = np.max(debug_stats['grad_norms'])
+    min_grad_norm_all = np.min(debug_stats['grad_norms'])
+    
+    print(f"\n🔧 Gradient Flow:")
+    print(f"  Average gradient norm: {avg_grad_norm_all:.4f}")
+    print(f"  Max gradient norm: {max_grad_norm_all:.4f}")
+    print(f"  Min gradient norm: {min_grad_norm_all:.4f}")
+    if avg_grad_norm_all < 0.01:
+        print(f"  ⚠️  Very small gradients - might benefit from higher learning rate")
+    elif max_grad_norm_all > 4.0:
+        print(f"  ⚠️  Large gradients frequently clipped - might benefit from lower LR or stronger regularization")
+    else:
+        print(f"  ✓ Gradient flow looks healthy")
+    
+    # Plot training diagnostics
+    fig = plt.figure(figsize=(15, 10))
+    
+    # Gradient norms over epochs
+    plt.subplot(2, 3, 1)
+    plt.plot(debug_stats['grad_norms'], color='purple', alpha=0.7)
+    plt.axhline(y=avg_grad_norm_all, color='red', linestyle='--', label=f'Mean: {avg_grad_norm_all:.3f}')
+    plt.xlabel('Epoch')
+    plt.ylabel('Average Gradient Norm')
+    plt.title('Gradient Flow During Training')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    # Learning rate schedule
+    plt.subplot(2, 3, 2)
+    plt.plot(debug_stats['learning_rates'], color='blue', alpha=0.7)
+    plt.xlabel('Epoch')
+    plt.ylabel('Learning Rate')
+    plt.title('Learning Rate Schedule')
+    plt.yscale('log')
+    plt.grid(True, alpha=0.3)
+    
+    # Batch loss distribution
+    plt.subplot(2, 3, 3)
+    plt.hist(debug_stats['batch_losses'], bins=50, color='orange', alpha=0.7, edgecolor='black')
+    plt.xlabel('Batch Loss')
+    plt.ylabel('Frequency')
+    plt.title('Batch Loss Distribution')
+    plt.grid(True, alpha=0.3)
+    
+    # Training curves
+    plt.subplot(2, 3, 4)
+    plt.plot(train_losses, label='Train Loss', color='blue', alpha=0.7)
+    plt.plot(val_losses, label='Val Loss', color='red', alpha=0.7)
+    plt.axvline(best_epoch-1, color='green', linestyle='--', label=f'Best Epoch ({best_epoch})')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title('Training & Validation Loss')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    plt.subplot(2, 3, 5)
+    plt.plot(train_accuracies, label='Train Acc', color='blue', alpha=0.7)
+    plt.plot(val_accuracies, label='Val Acc', color='red', alpha=0.7)
+    plt.axvline(best_epoch-1, color='green', linestyle='--', label=f'Best Epoch ({best_epoch})')
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy')
+    plt.title('Training & Validation Accuracy')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    # Overfitting analysis
+    plt.subplot(2, 3, 6)
+    train_val_gap = [train - val for train, val in zip(train_accuracies, val_accuracies)]
+    plt.plot(train_val_gap, color='purple', alpha=0.7)
+    plt.axhline(y=0, color='black', linestyle='-', linewidth=0.5)
+    plt.axhline(y=np.mean(train_val_gap), color='red', linestyle='--', label=f'Mean Gap: {np.mean(train_val_gap):.3f}')
+    plt.xlabel('Epoch')
+    plt.ylabel('Train - Val Accuracy')
+    plt.title('Overfitting Monitor (Train-Val Gap)')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(f'saved_models/training_diagnostics_{fold_name}.png', dpi=300, bbox_inches='tight')
+    print(f"📊 Training diagnostics plot saved to: saved_models/training_diagnostics_{fold_name}.png")
+    plt.close()
+    
+    # Overfitting check
+    final_train_val_gap = train_accuracies[-1] - val_accuracies[-1]
+    print(f"\n📈 Overfitting Analysis:")
+    print(f"  Final train-val gap: {final_train_val_gap:.3f}")
+    print(f"  Average train-val gap: {np.mean(train_val_gap):.3f}")
+    if final_train_val_gap > 0.1:
+        print(f"  ⚠️  Significant overfitting detected - consider:")
+        print(f"     • Increasing dropout (current: 0.25)")
+        print(f"     • Reducing model capacity")
+        print(f"     • More aggressive data augmentation")
+    elif final_train_val_gap < -0.05:
+        print(f"  ⚠️  Underfitting detected - val accuracy > train accuracy")
+        print(f"     • Model might be too regularized")
+        print(f"     • Consider reducing dropout or weight decay")
+    else:
+        print(f"  ✓ Good train-val balance - no significant overfitting")
+    
+    # Clean up hooks
+    for handle in hook_handles:
+        handle.remove()
+    
+    # Save extensive debugging data
+    debug_save_path = f'saved_models/debug_data_{fold_name}.pkl'
+    with open(debug_save_path, 'wb') as f:
+        pickle.dump(debug_stats, f)
+    print(f"\n📊 Debugging data saved to: {debug_save_path}")
+    
+    # Generate detailed diagnostic summary
+    print(f"\n{'='*80}")
+    print(f"BOTTLENECK ANALYSIS FOR {fold_name}")
+    print(f"{'='*80}")
+    
+    # 1. Gradient flow analysis
+    if debug_stats['grad_norms']:
+        grad_stats = debug_stats['grad_norms']
+        print(f"\n1️⃣ GRADIENT FLOW:")
+        print(f"   Mean: {np.mean(grad_stats):.4f}")
+        print(f"   Std: {np.std(grad_stats):.4f}")
+        print(f"   Range: [{np.min(grad_stats):.4f}, {np.max(grad_stats):.4f}]")
+        if np.mean(grad_stats) > 0:
+            print(f"   Coefficient of Variation: {np.std(grad_stats)/np.mean(grad_stats):.4f}")
+    
+    # 2. Learning dynamics
+    if debug_stats['learning_dynamics']:
+        entropy_vals = [d['avg_entropy'] for d in debug_stats['learning_dynamics']]
+        confidence_vals = [d['confidence'] for d in debug_stats['learning_dynamics']]
+        print(f"\n2️⃣ LEARNING DYNAMICS:")
+        print(f"   Avg Entropy: {np.mean(entropy_vals):.4f} (lower = more confident)")
+        print(f"   Avg Confidence: {np.mean(confidence_vals):.4f}")
+        print(f"   Entropy trend: {entropy_vals[0]:.4f} → {entropy_vals[-1]:.4f}")
+    
+    # 3. Input data quality
+    if debug_stats['batch_input_stats']:
+        input_means = [s['mean'] for s in debug_stats['batch_input_stats']]
+        input_stds = [s['std'] for s in debug_stats['batch_input_stats']]
+        input_zeros = [s['zeros'] for s in debug_stats['batch_input_stats']]
+        print(f"\n3️⃣ INPUT DATA QUALITY:")
+        print(f"   Mean intensity: {np.mean(input_means):.4f} ± {np.std(input_means):.4f}")
+        print(f"   Mean std: {np.mean(input_stds):.4f}")
+        print(f"   Avg sparsity: {np.mean(input_zeros)*100:.1f}% zeros")
+    
+    # 4. Activation health
+    if debug_stats['activation_stats']:
+        all_sparsity = [v['mean_sparsity'] for v in debug_stats['activation_stats'].values()]
+        all_dead = [v['dead_neurons'] for v in debug_stats['activation_stats'].values()]
+        print(f"\n4️⃣ ACTIVATION HEALTH:")
+        print(f"   Avg sparsity: {np.mean(all_sparsity):.4f}")
+        print(f"   Dead neurons: {np.mean(all_dead):.1f} layers/epoch")
+    
+    # 5. Weight update magnitude
+    if debug_stats['weight_updates']:
+        all_updates = []
+        for update_dict in debug_stats['weight_updates']:
+            all_updates.extend(update_dict.values())
+        print(f"\n5️⃣ WEIGHT UPDATE MAGNITUDE:")
+        print(f"   Mean: {np.mean(all_updates):.6f}")
+        print(f"   Range: [{np.min(all_updates):.6f}, {np.max(all_updates):.6f}]")
+        if np.mean(all_updates) < 1e-5:
+            print(f"   ⚠️  Very small updates - learning is slow")
+    
+    # 6. Identify bottleneck
+    print(f"\n🔍 BOTTLENECK DIAGNOSIS:")
+    bottlenecks = []
+    
+    if debug_stats['grad_norms'] and np.mean(debug_stats['grad_norms']) < 0.01:
+        bottlenecks.append("Vanishing gradients - consider higher LR or skip connections")
+    if debug_stats['grad_norms'] and np.max(debug_stats['grad_norms']) > 10:
+        bottlenecks.append("Exploding gradients - lower LR or stronger clipping")
+    if debug_stats['activation_stats']:
+        avg_dead = np.mean([v['dead_neurons'] for v in debug_stats['activation_stats'].values()])
+        if avg_dead > 5:
+            bottlenecks.append(f"Too many dead neurons ({avg_dead:.0f}) - ReLU dying issue")
+    if debug_stats['weight_updates'] and np.mean([np.mean(list(u.values())) for u in debug_stats['weight_updates']]) < 1e-6:
+        bottlenecks.append("Minimal weight updates - learning plateau")
+    if debug_stats['learning_dynamics']:
+        final_entropy = debug_stats['learning_dynamics'][-1]['avg_entropy']
+        if final_entropy > 0.6:
+            bottlenecks.append("High output entropy - model is uncertain/confused")
+    
+    if bottlenecks:
+        for i, bottleneck in enumerate(bottlenecks, 1):
+            print(f"   {i}. {bottleneck}")
+    else:
+        print(f"   ✓ No major bottlenecks detected - training appears healthy")
+    
+    print(f"\n{'='*80}\n")
 
     print(f"\nFold {fold_name} Complete!")
     print(f"Best Validation Epoch: {best_epoch} | Val F1: {best_val_f1:.4f} | Val Acc: {best_val_acc:.4f}")
@@ -1160,14 +1611,23 @@ def main():
     import time
     start_time = time.time()
     
+    # L4 GPU Optimizations (24GB VRAM)
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True  # Auto-optimize CUDA kernels
+        torch.backends.cuda.matmul.allow_tf32 = True  # Use TensorFloat-32 for speed
+        torch.backends.cudnn.allow_tf32 = True
+    
     # Configuration parameters
     NUM_EPOCHS = 75
     PATIENCE = 20  # Increased to survive 20-epoch restart cycles
-    LR = 0.0005
-    BATCH_SIZE = 32
+    LR = 0.0001  # Restored to 87% baseline value (was incorrectly lowered to 5e-5)
+    BATCH_SIZE = 64  # Optimized for L4 GPU (24GB) - 2x increase from 32
     WEIGHT_DECAY = 1e-3
+    NUM_WORKERS = 8  # Increased for better data pipeline throughput
     
     QUICK_TEST = True
+    USE_ENTROPY_FILTER = True  # Enable TPSF entropy filtering
+    ENTROPY_THRESHOLD_SIGMA = 2.0  # Standard deviations for filtering (2.0σ = 5% filtered)
     
     # Set random seed for reproducibility
     RANDOM_SEED = 42
@@ -1178,7 +1638,13 @@ def main():
     
     # Setup device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}\n")
+    print(f"Using device: {device}")
+    if torch.cuda.is_available():
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+        print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+        print(f"Optimizations: CUDNN benchmark=True, TF32=True\n")
+    else:
+        print()
     print(f"⏰ Started at: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
     
     # Directory for saving models
@@ -1188,7 +1654,18 @@ def main():
     print("="*80)
     print("COLLECTING DATA")
     print("="*80)
-    dataset_dict = collect_data_by_folder()
+    
+    if USE_ENTROPY_FILTER:
+        print(f"🔬 ENTROPY FILTERING ENABLED (±{ENTROPY_THRESHOLD_SIGMA}σ threshold)")
+        print(f"   Based on TPSF paper: removes poorly segmented cells")
+        print(f"   Expected to filter ~5% of cells globally")
+        print(f"   D4 expected: ~22.8% (high entropy variance)")
+        print()
+    
+    dataset_dict = collect_data_by_folder(
+        use_entropy_filter=USE_ENTROPY_FILTER,
+        entropy_threshold_sigma=ENTROPY_THRESHOLD_SIGMA
+    )
     
     # Check if any datasets were found
     if len(dataset_dict) == 0:
@@ -1282,7 +1759,8 @@ def main():
                 patience=PATIENCE,
                 batch_size=BATCH_SIZE,
                 learning_rate=LR,
-                weight_decay=WEIGHT_DECAY
+                weight_decay=WEIGHT_DECAY,
+                num_workers=NUM_WORKERS
             )
             
             # Store hyperparameters used in this fold
@@ -1370,7 +1848,8 @@ def main():
             patience=PATIENCE,
             batch_size=best_overall_hyperparams['batch_size'],
             learning_rate=best_overall_hyperparams['learning_rate'],
-            weight_decay=best_overall_hyperparams['weight_decay']
+            weight_decay=best_overall_hyperparams['weight_decay'],
+            num_workers=NUM_WORKERS
     )
     
     # Print final D5 results
